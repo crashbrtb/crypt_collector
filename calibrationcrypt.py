@@ -13,7 +13,7 @@ from language import UI, LOGS, MESSAGES, get_text, LANGUAGES
 
 # Corrigindo o caminho do arquivo para usar o diretório do script
 script_dir = os.path.dirname(os.path.abspath(__file__))
-file = os.path.join(script_dir, 'config_cript.cfg')
+file = os.path.join(script_dir, 'config_crypt.cfg')
 scroll_count = 0
 
 def get_current_language():

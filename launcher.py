@@ -16,9 +16,9 @@ from language import UI, LANGUAGES, LOGS, get_text
 
 # --- Configurações ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(SCRIPT_DIR, 'config_cript.cfg')
+CONFIG_FILE = os.path.join(SCRIPT_DIR, 'config_crypt.cfg')
 # Atualize o nome do arquivo aqui
-TEST_SCRIPT = os.path.join(SCRIPT_DIR, 'cripting.py')
+TEST_SCRIPT = os.path.join(SCRIPT_DIR, 'crypting.py')
 IMAGE_BASE_DIR = os.path.join(SCRIPT_DIR, 'images', 'cript') # Base para common/epic/rare
 COMMON_DIR = os.path.join(IMAGE_BASE_DIR, 'common')
 EPIC_DIR = os.path.join(IMAGE_BASE_DIR, 'epic')
@@ -566,7 +566,7 @@ class ImageSelectorApp:
         """Executa o script de calibração e fecha a janela principal."""
         try:
             # Prepara o comando para executar o script calibrationcript.py
-            calibration_script = os.path.join(SCRIPT_DIR, 'calibrationcript.py')
+            calibration_script = os.path.join(SCRIPT_DIR, 'calibrationcrypt.py')
             
             # Verifica se o arquivo existe
             if not os.path.exists(calibration_script):
@@ -588,7 +588,7 @@ class ImageSelectorApp:
                                get_text(UI, "calibration_script_error", current_language).format(e))
 																									
     def run_script(self):
-        """Salva a config, ativa a janela do jogo, executa cripting.py e mostra a saída."""
+        """Salva a config, ativa a janela do jogo, executa crypting.py e mostra a saída."""
         if self.cripting_process:
              messagebox.showwarning(get_text(UI, "warning_title", current_language),get_text(UI, "script_already_running", current_language))
 																						   
@@ -684,7 +684,7 @@ class ImageSelectorApp:
             self.append_to_status(get_text(LOGS, "starting_script", current_language)) # Mensagem inicial
 						  
 
-            # Executa o script cripting.py capturando a saída
+            # Executa o script crypting.py capturando a saída
             self.cripting_process = subprocess.Popen(
                 [sys.executable, TEST_SCRIPT],
                 cwd=SCRIPT_DIR,

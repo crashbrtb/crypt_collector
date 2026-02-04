@@ -14,7 +14,7 @@ import sys
 import configparser
 from language import MESSAGES, LOGS, get_text, LANGUAGES
 
-CONFIG_FILE = "config_cript.cfg"
+CONFIG_FILE = "config_crypt.cfg"
 
 def get_current_language():
     config = configparser.ConfigParser()
@@ -248,7 +248,7 @@ if __name__ == "__main__":
     # Get the directory where the script is located
     os_dir = os.path.dirname(os.path.abspath(__file__))
     # Construct the full path to the config file
-    config_path = os.path.join(os_dir, 'config_cript.cfg')
+    config_path = os.path.join(os_dir, 'config_crypt.cfg')
     config = configparser.ConfigParser()
     # Read the config file using the full path
     config.read(config_path)
