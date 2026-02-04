@@ -17,3 +17,6 @@ How to use
 4. Run `docrypt.exe` or `launcher.py`.
 5. The app is calibrated for 1080p and a maximized game window. If your setup is different, click **Calibrate** and follow the instructions. You only need to calibrate once.
 6. In the app, select the same crypt type you selected in the game menu, choose the quantity, and click **Start**.
+
+Video Tutorial
+https://youtu.be/xB7leLdwmT8
