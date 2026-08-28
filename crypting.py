@@ -272,6 +272,14 @@ if __name__ == "__main__":
     cord_click_go_cript = eval(config['COORDINATES']['cord_click_go_cript'])
     search_cript = eval(config['COORDINATES']['search_cript'])
     rare_cript = eval(config['COORDINATES']['rare_cript'])
+    any_cript = False
+    if 'any_cript' in config['COORDINATES']:
+        try:
+            any_cript = eval(config['COORDINATES']['any_cript'])
+        except Exception:
+            any_cript = config['COORDINATES'].getboolean('any_cript', fallback=False)
+    elif search_cript == ['any'] or search_cript == 'any':
+        any_cript = True
     cord_explore_button = eval(config['COORDINATES']['cord_explore_button'])
     counter = 0 #Counter for cript
     errors = 0
@@ -285,12 +293,13 @@ if __name__ == "__main__":
             if search_for_x():  # verify if store screen is open before start
                 print(get_text(LOGS, "store_screen_close", current_language))
             open_cript_menu()
-            founded_cript = search_for_cripts(search_cript)
-            if founded_cript:
-                print("Cript found")
+
+            if any_cript:
+                print(get_text(LOGS, "any_cript_selected", current_language))
+                click(cord_click_go_cript[0], cord_click_go_cript[1])
                 if search_for_x():  # verify if store screen is open before start
                     print(get_text(LOGS, "store_screen_close", current_language))
-                if do_cript(founded_cript):
+                if do_cript('any'):
                     print(get_text(LOGS, "Invading_crypt", current_language))
                     if speedup_march(): # speedup_march agora retorna False se interrompido
                         if interrupted: break # Verificar após cada passo
@@ -302,17 +311,39 @@ if __name__ == "__main__":
                         print(get_text(LOGS, "error_in_speedup_march", current_language))
                         errors = errors + 1
                         print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
-
-                    elif not interrupted: # Só conta como erro se não foi interrupção
-                        print(get_text(LOGS, "error_in_cript", current_language))
-                        errors = errors + 1
-                        print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
                 elif not interrupted: # Só conta como erro se não foi interrupção
-                    print(get_text(LOGS, "error_serch_cript", current_language))
+                    print(get_text(LOGS, "error_in_cript", current_language))
                     errors = errors + 1
                     print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
+            else:
+                founded_cript = search_for_cripts(search_cript)
+                if founded_cript:
+                    print("Cript found")
+                    if search_for_x():  # verify if store screen is open before start
+                        print(get_text(LOGS, "store_screen_close", current_language))
+                    if do_cript(founded_cript):
+                        print(get_text(LOGS, "Invading_crypt", current_language))
+                        if speedup_march(): # speedup_march agora retorna False se interrompido
+                            if interrupted: break # Verificar após cada passo
+                            print(get_text(LOGS, "cript_speedup", current_language))
+                            counter += 1
+                            print(counter, "/", how_many_cripts, " ", get_text(LOGS, "explored_cripts", current_language))
+                        # Se speedup_march retornou False (por erro ou interrupção)
+                        elif not interrupted: # Só conta como erro se não foi interrupção
+                            print(get_text(LOGS, "error_in_speedup_march", current_language))
+                            errors = errors + 1
+                            print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
 
-                if interrupted: break # Verificar no final do loop
+                        elif not interrupted: # Só conta como erro se não foi interrupção
+                            print(get_text(LOGS, "error_in_cript", current_language))
+                            errors = errors + 1
+                            print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
+                    elif not interrupted: # Só conta como erro se não foi interrupção
+                        print(get_text(LOGS, "error_serch_cript", current_language))
+                        errors = errors + 1
+                        print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
+
+            if interrupted: break # Verificar no final do loop
 
     finally: # Bloco finally garante que isso execute mesmo se ocorrer um erro ou interrupção
         if interrupted:

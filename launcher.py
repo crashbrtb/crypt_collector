@@ -7,6 +7,17 @@ import subprocess
 import sys
 import threading # Adicionado threading
 import queue     # Adicionado queue
+import ctypes
+
+def hide_console():
+    """Oculta a janela de console no Windows caso tenha sido iniciado via python.exe ou prompt."""
+    try:
+        if sys.platform == "win32":
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0) # 0 = SW_HIDE
+    except Exception:
+        pass
 															 
 import time # <-- Mantido
 import win32gui # <-- Adicione esta linha
@@ -142,6 +153,8 @@ class ImageSelectorApp:
         self.selected_paths = set()
         self.image_widgets = {}
         self.current_directory = None
+        self.is_any_mode = False
+        self.any_mode_label = None
         self.cripting_process = None # Para guardar a referência do processo
         self.output_queue = queue.Queue() # Fila para comunicação entre threads
         self.status_window = None # Referência para a janela de status
@@ -176,7 +189,10 @@ class ImageSelectorApp:
         self.epic_button.pack(side=tk.LEFT, padx=5)
         self.rare_button = ttk.Button(type_frame, text=get_text(UI, "btn_rare", current_language), command=lambda: self.load_images(RARE_DIR))
         self.rare_button.pack(side=tk.LEFT, padx=5)
-        ttk.Button(type_frame, text=get_text(UI, "btn_calibrate", current_language), command=self.run_calibration).pack(side=tk.LEFT, padx=5)
+        self.any_button = ttk.Button(type_frame, text=get_text(UI, "btn_any", current_language), command=self.select_any_mode)
+        self.any_button.pack(side=tk.LEFT, padx=5)
+        self.calibrate_button = ttk.Button(type_frame, text=get_text(UI, "btn_calibrate", current_language), command=self.run_calibration)
+        self.calibrate_button.pack(side=tk.LEFT, padx=5)
 
         # Frame para exibir os ícones (com scroll)
         self.icon_canvas = tk.Canvas(master, borderwidth=0, background="#ffffff")
@@ -274,7 +290,10 @@ class ImageSelectorApp:
         self.common_button.config(text=get_text(UI, "btn_common", current_language))
         self.epic_button.config(text=get_text(UI, "btn_epic", current_language))
         self.rare_button.config(text=get_text(UI, "btn_rare", current_language))
-        # Repita para todos os widgets relevantes
+        self.any_button.config(text=get_text(UI, "btn_any", current_language))
+        self.calibrate_button.config(text=get_text(UI, "btn_calibrate", current_language))
+        if self.is_any_mode and self.any_mode_label and self.any_mode_label.winfo_exists():
+            self.any_mode_label.config(text=get_text(UI, "any_mode_active", current_language))
 
     def validate_numeric_input(self, value):
         """Valida se a entrada contém apenas números e tem no máximo 3 dígitos."""
@@ -441,14 +460,14 @@ class ImageSelectorApp:
 										   
                      print(get_text(LOGS, "status_window_update_error", current_language))
         if self.status_window and self.status_window.winfo_exists():
-																									
              print(get_text(LOGS, "destroying_status_window", current_language))
              self.status_window.destroy()
         self.status_window = None
         self.status_text_widget = None
-							  
         print(get_text(LOGS, "status_window_closed", current_language))
-        # self.master.destroy()
+        # Restaura a janela principal para que a aplicação não fique como processo fantasma
+        if self.master and self.master.winfo_exists():
+            self.master.deiconify()
 
 
     def toggle_selection(self, path):
@@ -466,12 +485,10 @@ class ImageSelectorApp:
             checkbutton.select() # Atualiza visualmente o checkbutton
             widget_info['label'].config(relief=tk.SOLID, background='lightblue') # Estilo selecionado
 
-							  
-        print("Selecteds:", [get_relative_path(p) for p in self.selected_paths]) # Debug
-
-
     def load_images(self, directory):
         """Carrega e exibe imagens do diretório especificado."""
+        self.is_any_mode = False
+        self.any_mode_label = None
         # Limpa ícones anteriores
         for widget in self.icon_frame.winfo_children():
             widget.destroy()
@@ -527,10 +544,6 @@ class ImageSelectorApp:
                 # Guarda referências
                 self.image_widgets[img_path] = {'label': label, 'checkbutton': chk, 'var': var}
 
-                # Não precisa mais verificar se já estava selecionado aqui
-                # if img_path in self.selected_paths:
-                #      label.config(relief=tk.SOLID, background='lightblue')
-
             except Exception as e:
                 print(get_text(LOGS, "image_load_error", current_language).format(img_path, e))
 
@@ -538,6 +551,26 @@ class ImageSelectorApp:
         self.master.update_idletasks() # Garante que a geometria esteja atualizada
         self.icon_canvas.configure(scrollregion=self.icon_canvas.bbox("all"))
 
+    def select_any_mode(self):
+        """Ativa o modo 'Any', limpando a grade de imagens e marcando a flag is_any_mode."""
+        self.is_any_mode = True
+        self.current_directory = None
+        self.selected_paths.clear()
+        for widget in self.icon_frame.winfo_children():
+            widget.destroy()
+        self.image_widgets.clear()
+        
+        self.any_mode_label = ttk.Label(
+            self.icon_frame,
+            text=get_text(UI, "any_mode_active", current_language),
+            font=("Segoe UI", 10, "italic"),
+            wraplength=450,
+            justify="center",
+            padding=20
+        )
+        self.any_mode_label.pack(expand=True, fill="both", pady=30, padx=10)
+        self.master.update_idletasks()
+        self.icon_canvas.configure(scrollregion=self.icon_canvas.bbox("all"))
 
     def select_all_visible(self):
         """Seleciona todas as imagens atualmente visíveis."""
@@ -574,9 +607,11 @@ class ImageSelectorApp:
                 return
                 
             # Executa o script em um novo processo
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             subprocess.Popen(
                 [sys.executable, calibration_script],
-                cwd=SCRIPT_DIR
+                cwd=SCRIPT_DIR,
+                creationflags=creationflags
             )
             
             # Fecha a janela principal
@@ -591,12 +626,10 @@ class ImageSelectorApp:
         """Salva a config, ativa a janela do jogo, executa crypting.py e mostra a saída."""
         if self.cripting_process:
              messagebox.showwarning(get_text(UI, "warning_title", current_language),get_text(UI, "script_already_running", current_language))
-																						   
              return
-        if not self.selected_paths:
+        if not self.is_any_mode and not self.selected_paths:
             messagebox.showwarning(get_text(UI, "warning_title", current_language), 
                                  get_text(UI, "no_images_selected", current_language))
-																					  
             return
             
         # Verifica se o campo de quantidade está preenchido
@@ -604,150 +637,87 @@ class ImageSelectorApp:
         if not how_many_value:
             messagebox.showwarning(get_text(UI, "warning_title", current_language), 
                       get_text(UI, "enter_crypt_quantity", current_language))
-																			 
             return
             
         # Salva a configuração
         try:
             config = configparser.ConfigParser()
-            # Verifica se o arquivo existe e carrega se existir
+            config.optionxform = str
             if os.path.exists(CONFIG_FILE):
                 config.read(CONFIG_FILE)
             
-            # Garante que a seção Settings existe
+            if 'COORDINATES' not in config:
+                config['COORDINATES'] = {}
             if 'Settings' not in config:
                 config['Settings'] = {}
                 
-            # Atualiza o valor de how_many_cripts
             config['COORDINATES']['how_many_cripts'] = how_many_value
             
-            # Salva as imagens selecionadas
-            config['Settings']['selected_images'] = ','.join([get_relative_path(p) for p in self.selected_paths]) # Linha 434
+            if self.is_any_mode:
+                config['COORDINATES']['any_cript'] = 'True'
+                config['COORDINATES']['search_cript'] = "['any']"
+                config['Settings']['selected_images'] = 'any'
+            else:
+                config['COORDINATES']['any_cript'] = 'False'
+                relative_paths = [get_relative_path(p) for p in self.selected_paths]
+                config['COORDINATES']['search_cript'] = str(relative_paths)
+                config['Settings']['selected_images'] = ','.join(relative_paths)
             
-            # Escreve no arquivo
             with open(CONFIG_FILE, 'w') as f:
                 config.write(f)
                 
-            print(f"Configuração salva. Quantidade de criptas: {how_many_value}")
+            print(f"Configuração salva. Quantidade de criptas: {how_many_value}, modo Any: {self.is_any_mode}")
         except Exception as e:
             print(f"Erro ao salvar configuração: {e}")
             messagebox.showerror(get_text(UI, "error_title", current_language), 
                                 get_text(UI, "save_config_fail", current_language).format(e))
-																							 
             return
 
         # --- ATIVAR JANELA DO JOGO ---
         game_window_title = 'Total Battle' # <-- CONFIRME ESTE TÍTULO!
         print(get_text(LOGS, "trying_activate_window", current_language).format(game_window_title))
-        # The call below should now work as the function is defined
         if not activate_window_by_title(game_window_title):
             messagebox.showwarning(get_text(UI, "warning_title", current_language), 
                       get_text(UI, "game_window_not_found", current_language).format(game_window_title))
-																										
-            # Decide se quer continuar mesmo assim ou parar
             exit()
-            #return # Descomente para parar se a janela não for ativada
 
-        # --- Continua com a lógica existente ---
-        # Formata os caminhos relativos para o config
-        relative_paths = [get_relative_path(p) for p in self.selected_paths]
-        config_value = str(relative_paths) # Converte a lista para string '[path1, path2]'
+        # Cria a janela de status ANTES de iniciar o processo
+        self.create_status_window()
+        self.append_to_status(get_text(LOGS, "starting_script", current_language)) # Mensagem inicial
 
-        print(f"Salvando no config: search_cript = {config_value}") # Debug
+        # Executa o script crypting.py capturando a saída
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        self.cripting_process = subprocess.Popen(
+            [sys.executable, TEST_SCRIPT],
+            cwd=SCRIPT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, # Captura erros também
+            text=True, # Decodifica a saída como texto
+            bufsize=1, # Line-buffered
+            universal_newlines=True, # Garante newlines consistentes
+            creationflags=creationflags
+        )
 
-        # Atualiza o arquivo de configuração
-        config = configparser.ConfigParser()
-        config.optionxform = str
-        try:
-            if not os.path.exists(CONFIG_FILE):
-                 messagebox.showerror(get_text(UI, "error_title", current_language),
-                                     get_text(UI, "config_file_not_found", current_language).format(CONFIG_FILE))
-																																																																	   
-                 return
+        # Inicia a thread para ler a saída do processo
+        self.output_reader_thread = threading.Thread(
+            target=self.read_process_output,
+            args=(self.cripting_process,),
+            daemon=True # Permite que a aplicação feche mesmo se a thread estiver rodando
+        )
+        self.output_reader_thread.start()
 
-            config.read(CONFIG_FILE)
+        # Inicia a atualização da janela de status
+        self.update_status_window()
 
-            if 'COORDINATES' not in config:
-                messagebox.showerror(get_text(UI, "error_title", current_language),
-                                     get_text(UI, "coordinates_section_not_found", current_language))
-																																												  
-                return
-
-            config['COORDINATES']['search_cript'] = config_value
-
-            with open(CONFIG_FILE, 'w') as configfile:
-                config.write(configfile)
-								  
-
-            # Cria a janela de status ANTES de iniciar o processo
-            self.create_status_window()
-            self.append_to_status(get_text(LOGS, "starting_script", current_language)) # Mensagem inicial
-						  
-
-            # Executa o script crypting.py capturando a saída
-            self.cripting_process = subprocess.Popen(
-                [sys.executable, TEST_SCRIPT],
-                cwd=SCRIPT_DIR,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, # Captura erros também
-                text=True, # Decodifica a saída como texto
-                bufsize=1, # Line-buffered
-                universal_newlines=True # Garante newlines consistentes
-            )
-
-            # Inicia a thread para ler a saída do processo
-            self.output_reader_thread = threading.Thread(
-                target=self.read_process_output,
-                args=(self.cripting_process,),
-                daemon=True # Permite que a aplicação feche mesmo se a thread estiver rodando
-            )
-            self.output_reader_thread.start()
-
-            # Inicia a atualização da janela de status
-            self.update_status_window()
-									  
-																						  
-
-            # Esconde a janela principal (opcional)
-            self.master.withdraw()
-												  
-								   
-										   
-																	 
-															   
-											  
-																		   
-				 
-
-            # NÃO FECHA MAIS A JANELA PRINCIPAL AQUI
-            # self.master.quit()
-													
-												  
-																								   
-				 
-												 
-
-															
-										   
-
-													   
-									  
-
-														 
-									
-
-        except configparser.Error as e:
-             messagebox.showerror(get_text(UI, "config_error_title", current_language),
-                                get_text(UI, "config_read_write_error", current_language).format(e))
-																									
-        except Exception as e:
-            messagebox.showerror("Erro", f"Ocorreu um erro inesperado:\n{e}")
+        # Esconde a janela principal (opcional)
+        self.master.withdraw()
 
 
 
 
 # --- Execução Principal ---
 if __name__ == "__main__":
+    hide_console()
     current_language = get_current_language()
     # Verifica se os diretórios de imagem existem
     if not os.path.isdir(COMMON_DIR):

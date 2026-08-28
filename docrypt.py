@@ -8,9 +8,20 @@ import sys
 import threading
 import queue
 import time
+import ctypes
 import win32gui
 import win32con
 import win32com.client
+
+def hide_console():
+    """Oculta a janela de console no Windows caso tenha sido iniciado via terminal/python.exe."""
+    try:
+        if sys.platform == "win32":
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0) # 0 = SW_HIDE
+    except Exception:
+        pass
 import timeit
 import cv2
 import numpy as np
@@ -145,6 +156,8 @@ class ImageSelectorApp:
         self.selected_paths = set()
         self.image_widgets = {}
         self.current_directory = None
+        self.is_any_mode = False
+        self.any_mode_label = None
         self.cripting_process = None
         self.output_queue = queue.Queue()
         self.status_window = None
@@ -190,9 +203,16 @@ class ImageSelectorApp:
             command=lambda: self.load_images(RARE_DIR),
         )
         self.rare_button.pack(side=tk.LEFT, padx=5)
-        ttk.Button(
+        self.any_button = ttk.Button(
+            type_frame,
+            text=get_text(UI, "btn_any", current_language),
+            command=self.select_any_mode,
+        )
+        self.any_button.pack(side=tk.LEFT, padx=5)
+        self.calibrate_button = ttk.Button(
             type_frame, text=get_text(UI, "btn_calibrate", current_language), command=self.run_calibration
-        ).pack(side=tk.LEFT, padx=5)
+        )
+        self.calibrate_button.pack(side=tk.LEFT, padx=5)
 
         self.icon_canvas = tk.Canvas(master, borderwidth=0, background="#ffffff")
         self.icon_frame = ttk.Frame(self.icon_canvas, style="My.TFrame")
@@ -275,6 +295,10 @@ class ImageSelectorApp:
         self.common_button.config(text=get_text(UI, "btn_common", current_language))
         self.epic_button.config(text=get_text(UI, "btn_epic", current_language))
         self.rare_button.config(text=get_text(UI, "btn_rare", current_language))
+        self.any_button.config(text=get_text(UI, "btn_any", current_language))
+        self.calibrate_button.config(text=get_text(UI, "btn_calibrate", current_language))
+        if self.is_any_mode and self.any_mode_label and self.any_mode_label.winfo_exists():
+            self.any_mode_label.config(text=get_text(UI, "any_mode_active", current_language))
 
     def validate_numeric_input(self, value):
         """Valida se a entrada contém apenas números e tem no máximo 3 dígitos."""
@@ -417,6 +441,8 @@ class ImageSelectorApp:
         self.status_window = None
         self.status_text_widget = None
         print(get_text(LOGS, "status_window_closed", current_language))
+        if self.master and self.master.winfo_exists():
+            self.master.deiconify()
 
     def toggle_selection(self, path):
         """Adiciona ou remove um caminho da seleção."""
@@ -438,6 +464,8 @@ class ImageSelectorApp:
 
     def load_images(self, directory):
         """Carrega e exibe imagens do diretório especificado."""
+        self.is_any_mode = False
+        self.any_mode_label = None
         for widget in self.icon_frame.winfo_children():
             widget.destroy()
         self.image_widgets.clear()
@@ -487,6 +515,27 @@ class ImageSelectorApp:
         self.master.update_idletasks()
         self.icon_canvas.configure(scrollregion=self.icon_canvas.bbox("all"))
 
+    def select_any_mode(self):
+        """Ativa o modo 'Any', limpando a grade de imagens e marcando a flag is_any_mode."""
+        self.is_any_mode = True
+        self.current_directory = None
+        self.selected_paths.clear()
+        for widget in self.icon_frame.winfo_children():
+            widget.destroy()
+        self.image_widgets.clear()
+
+        self.any_mode_label = ttk.Label(
+            self.icon_frame,
+            text=get_text(UI, "any_mode_active", current_language),
+            font=("Segoe UI", 10, "italic"),
+            wraplength=450,
+            justify="center",
+            padding=20,
+        )
+        self.any_mode_label.pack(expand=True, fill="both", pady=30, padx=10)
+        self.master.update_idletasks()
+        self.icon_canvas.configure(scrollregion=self.icon_canvas.bbox("all"))
+
     def select_all_visible(self):
         """Seleciona todas as imagens atualmente visíveis."""
         if not self.current_directory:
@@ -509,7 +558,8 @@ class ImageSelectorApp:
     def run_calibration(self):
         """Executa o script de calibração e fecha a janela principal."""
         try:
-            subprocess.Popen([sys.executable, SELF_SCRIPT, "--calibration"], cwd=SCRIPT_DIR)
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            subprocess.Popen([sys.executable, SELF_SCRIPT, "--calibration"], cwd=SCRIPT_DIR, creationflags=creationflags)
 
             print(get_text(LOGS, "closing_main_for_calibration", current_language))
             self.master.destroy()
@@ -527,7 +577,7 @@ class ImageSelectorApp:
                 get_text(UI, "warning_title", current_language), get_text(UI, "script_already_running", current_language)
             )
             return
-        if not self.selected_paths:
+        if not self.is_any_mode and not self.selected_paths:
             messagebox.showwarning(
                 get_text(UI, "warning_title", current_language), get_text(UI, "no_images_selected", current_language)
             )
@@ -543,18 +593,30 @@ class ImageSelectorApp:
 
         try:
             config = configparser.ConfigParser()
+            config.optionxform = str
             if os.path.exists(CONFIG_FILE):
                 config.read(CONFIG_FILE)
+            if "COORDINATES" not in config:
+                config["COORDINATES"] = {}
             if "Settings" not in config:
                 config["Settings"] = {}
 
             config["COORDINATES"]["how_many_cripts"] = how_many_value
-            config["Settings"]["selected_images"] = ",".join([get_relative_path(p) for p in self.selected_paths])
+
+            if self.is_any_mode:
+                config["COORDINATES"]["any_cript"] = "True"
+                config["COORDINATES"]["search_cript"] = "['any']"
+                config["Settings"]["selected_images"] = "any"
+            else:
+                config["COORDINATES"]["any_cript"] = "False"
+                relative_paths = [get_relative_path(p) for p in self.selected_paths]
+                config["COORDINATES"]["search_cript"] = str(relative_paths)
+                config["Settings"]["selected_images"] = ",".join(relative_paths)
 
             with open(CONFIG_FILE, "w") as f:
                 config.write(f)
 
-            print(f"Configuração salva. Quantidade de criptas: {how_many_value}")
+            print(f"Configuração salva. Quantidade de criptas: {how_many_value}, modo Any: {self.is_any_mode}")
         except Exception as e:
             print(f"Erro ao salvar configuração: {e}")
             messagebox.showerror(
@@ -572,63 +634,28 @@ class ImageSelectorApp:
             )
             exit()
 
-        relative_paths = [get_relative_path(p) for p in self.selected_paths]
-        config_value = str(relative_paths)
+        self.create_status_window()
+        self.append_to_status(get_text(LOGS, "starting_script", current_language))
 
-        print(f"Salvando no config: search_cript = {config_value}")
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        self.cripting_process = subprocess.Popen(
+            [sys.executable, SELF_SCRIPT, "--crypting"],
+            cwd=SCRIPT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            creationflags=creationflags,
+        )
 
-        config = configparser.ConfigParser()
-        config.optionxform = str
-        try:
-            if not os.path.exists(CONFIG_FILE):
-                messagebox.showerror(
-                    get_text(UI, "error_title", current_language),
-                    get_text(UI, "config_file_not_found", current_language).format(CONFIG_FILE),
-                )
-                return
+        self.output_reader_thread = threading.Thread(
+            target=self.read_process_output, args=(self.cripting_process,), daemon=True
+        )
+        self.output_reader_thread.start()
 
-            config.read(CONFIG_FILE)
-
-            if "COORDINATES" not in config:
-                messagebox.showerror(
-                    get_text(UI, "error_title", current_language),
-                    get_text(UI, "coordinates_section_not_found", current_language),
-                )
-                return
-
-            config["COORDINATES"]["search_cript"] = config_value
-
-            with open(CONFIG_FILE, "w") as configfile:
-                config.write(configfile)
-
-            self.create_status_window()
-            self.append_to_status(get_text(LOGS, "starting_script", current_language))
-
-            self.cripting_process = subprocess.Popen(
-                [sys.executable, SELF_SCRIPT, "--crypting"],
-                cwd=SCRIPT_DIR,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-            )
-
-            self.output_reader_thread = threading.Thread(
-                target=self.read_process_output, args=(self.cripting_process,), daemon=True
-            )
-            self.output_reader_thread.start()
-
-            self.update_status_window()
-            self.master.withdraw()
-
-        except configparser.Error as e:
-            messagebox.showerror(
-                get_text(UI, "config_error_title", current_language),
-                get_text(UI, "config_read_write_error", current_language).format(e),
-            )
-        except Exception as e:
-            messagebox.showerror("Erro", f"Ocorreu um erro inesperado:\n{e}")
+        self.update_status_window()
+        self.master.withdraw()
 
 
 # --- Lógica de cripta ---
@@ -1172,6 +1199,14 @@ def run_crypting():
     cord_click_go_cript = eval(config["COORDINATES"]["cord_click_go_cript"])
     search_cript = eval(config["COORDINATES"]["search_cript"])
     rare_cript = eval(config["COORDINATES"]["rare_cript"])
+    any_cript = False
+    if "any_cript" in config["COORDINATES"]:
+        try:
+            any_cript = eval(config["COORDINATES"]["any_cript"])
+        except Exception:
+            any_cript = config["COORDINATES"].getboolean("any_cript", fallback=False)
+    elif search_cript == ["any"] or search_cript == "any":
+        any_cript = True
     cord_explore_button = eval(config["COORDINATES"]["cord_explore_button"])
     counter = 0
     errors = 0
@@ -1183,12 +1218,13 @@ def run_crypting():
             if search_for_x():
                 print(get_text(LOGS, "store_screen_close", current_language))
             open_cript_menu()
-            founded_cript = search_for_cripts(search_cript)
-            if founded_cript:
-                print("Cript found")
+
+            if any_cript:
+                print(get_text(LOGS, "any_cript_selected", current_language))
+                click(cord_click_go_cript[0], cord_click_go_cript[1])
                 if search_for_x():
                     print(get_text(LOGS, "store_screen_close", current_language))
-                if do_cript(founded_cript):
+                if do_cript("any"):
                     print(get_text(LOGS, "Invading_crypt", current_language))
                     if speedup_march():
                         if interrupted:
@@ -1200,15 +1236,37 @@ def run_crypting():
                         print(get_text(LOGS, "error_in_speedup_march", current_language))
                         errors = errors + 1
                         print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
-
-                    elif not interrupted:
-                        print(get_text(LOGS, "error_in_cript", current_language))
-                        errors = errors + 1
-                        print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
                 elif not interrupted:
-                    print(get_text(LOGS, "error_serch_cript", current_language))
+                    print(get_text(LOGS, "error_in_cript", current_language))
                     errors = errors + 1
                     print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
+            else:
+                founded_cript = search_for_cripts(search_cript)
+                if founded_cript:
+                    print("Cript found")
+                    if search_for_x():
+                        print(get_text(LOGS, "store_screen_close", current_language))
+                    if do_cript(founded_cript):
+                        print(get_text(LOGS, "Invading_crypt", current_language))
+                        if speedup_march():
+                            if interrupted:
+                                break
+                            print(get_text(LOGS, "cript_speedup", current_language))
+                            counter += 1
+                            print(counter, "/", how_many_cripts, " ", get_text(LOGS, "explored_cripts", current_language))
+                        elif not interrupted:
+                            print(get_text(LOGS, "error_in_speedup_march", current_language))
+                            errors = errors + 1
+                            print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
+
+                        elif not interrupted:
+                            print(get_text(LOGS, "error_in_cript", current_language))
+                            errors = errors + 1
+                            print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
+                    elif not interrupted:
+                        print(get_text(LOGS, "error_serch_cript", current_language))
+                        errors = errors + 1
+                        print(errors, " ", get_text(LOGS, "errors_was_detected", current_language))
 
             if interrupted:
                 break
@@ -1231,6 +1289,7 @@ def run_crypting():
 
 # --- Execução Principal ---
 if __name__ == "__main__":
+    hide_console()
     current_language = get_current_language()
 
     if "--crypting" in sys.argv:

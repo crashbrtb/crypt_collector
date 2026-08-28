@@ -6,10 +6,21 @@ from screeninfo import get_monitors
 import sys
 import os
 import time
+import ctypes
 import win32gui
 import win32con
 import win32com.client
 from language import UI, LOGS, MESSAGES, get_text, LANGUAGES
+
+def hide_console():
+    """Oculta a janela de console no Windows se executado via python.exe."""
+    try:
+        if sys.platform == "win32":
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
 
 # Corrigindo o caminho do arquivo para usar o diretório do script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -344,6 +355,7 @@ def activate_window_by_title(title):
         return False
 
 if __name__ == "__main__":
+    hide_console()
     try:
         # Usar nossa função de alerta personalizada
         result = custom_alert(get_text(UI, "calibration_title", current_language), 
