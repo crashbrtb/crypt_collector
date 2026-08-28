@@ -23,7 +23,7 @@ import time # <-- Mantido
 import win32gui # <-- Adicione esta linha
 import win32con # <-- Adicione esta linha
 import win32com.client # <-- Adicione esta linha
-from language import UI, LANGUAGES, LOGS, get_text
+from language import UI, LANGUAGES, LOGS, get_text, APP_VERSION
 
 # --- Configurações ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -146,7 +146,7 @@ class ImageSelectorApp:
         self.master = master
         # Atualiza o título da janela com o idioma correto já ao iniciar
 							  
-        master.title(get_text(UI, "main_title", current_language))
+        master.title(f"{get_text(UI, 'main_title', current_language)} {APP_VERSION}")
         # Não definir geometria fixa inicialmente, ou ajustar depois
         # master.geometry("600x400")
 
@@ -281,7 +281,7 @@ class ImageSelectorApp:
 
     def update_ui_language(self):
         # Atualiza todos os textos da interface conforme o idioma selecionado
-        self.master.title(get_text(UI, "main_title", current_language))
+        self.master.title(f"{get_text(UI, 'main_title', current_language)} {APP_VERSION}")
         self.language_label.config(text=get_text(UI, "language", current_language))
         self.language_combo.set(get_text(UI, "language", current_language))
         self.play_button.config(text=get_text(UI, "btn_play", current_language))

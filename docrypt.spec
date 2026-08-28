@@ -5,7 +5,7 @@ a = Analysis(
     ['docrypt.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('images', 'images'), ('config_crypt.cfg', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['icone.ico'],
 )
 coll = COLLECT(
     exe,

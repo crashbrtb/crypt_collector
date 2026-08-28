@@ -30,12 +30,17 @@ import keyboard
 from pynput import mouse
 from screeninfo import get_monitors
 
-from language import UI, LANGUAGES, LOGS, MESSAGES, get_text
+from language import UI, LANGUAGES, LOGS, MESSAGES, get_text, APP_VERSION
 
 # --- Configurações ---
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+    SELF_SCRIPT = sys.executable
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    SELF_SCRIPT = os.path.abspath(__file__)
+
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config_crypt.cfg")
-SELF_SCRIPT = os.path.abspath(__file__)
 
 IMAGE_BASE_DIR = os.path.join(SCRIPT_DIR, "images", "cript")
 COMMON_DIR = os.path.join(IMAGE_BASE_DIR, "common")
@@ -151,7 +156,7 @@ class ImageSelectorApp:
     def __init__(self, master):
         global current_language
         self.master = master
-        master.title(get_text(UI, "main_title", current_language))
+        master.title(f"{get_text(UI, 'main_title', current_language)} {APP_VERSION}")
 
         self.selected_paths = set()
         self.image_widgets = {}
@@ -286,7 +291,7 @@ class ImageSelectorApp:
         self.update_ui_language()
 
     def update_ui_language(self):
-        self.master.title(get_text(UI, "main_title", current_language))
+        self.master.title(f"{get_text(UI, 'main_title', current_language)} {APP_VERSION}")
         self.language_label.config(text=get_text(UI, "language", current_language))
         self.language_combo.set(get_text(UI, "language", current_language))
         self.play_button.config(text=get_text(UI, "btn_play", current_language))
@@ -559,7 +564,11 @@ class ImageSelectorApp:
         """Executa o script de calibração e fecha a janela principal."""
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-            subprocess.Popen([sys.executable, SELF_SCRIPT, "--calibration"], cwd=SCRIPT_DIR, creationflags=creationflags)
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--calibration"]
+            else:
+                cmd = [sys.executable, SELF_SCRIPT, "--calibration"]
+            subprocess.Popen(cmd, cwd=SCRIPT_DIR, creationflags=creationflags)
 
             print(get_text(LOGS, "closing_main_for_calibration", current_language))
             self.master.destroy()
@@ -638,8 +647,13 @@ class ImageSelectorApp:
         self.append_to_status(get_text(LOGS, "starting_script", current_language))
 
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--crypting"]
+        else:
+            cmd = [sys.executable, SELF_SCRIPT, "--crypting"]
+
         self.cripting_process = subprocess.Popen(
-            [sys.executable, SELF_SCRIPT, "--crypting"],
+            cmd,
             cwd=SCRIPT_DIR,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1175,7 +1189,7 @@ def run_crypting():
     interrupted = False
     keyboard.add_hotkey("esc", on_esc_press)
 
-    os_dir = os.path.dirname(os.path.abspath(__file__))
+    os_dir = SCRIPT_DIR
     config_path = os.path.join(os_dir, "config_crypt.cfg")
     config = configparser.ConfigParser()
     config.read(config_path)

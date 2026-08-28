@@ -4,6 +4,8 @@ Arquivo de linguagem para o Total Battle Tools
 Contém todas as strings traduzidas usadas na aplicação
 """
 
+APP_VERSION = "v1.1.1"
+
 # Dicionário de idiomas disponíveis
 LANGUAGES = {
     "pt": "Português",
