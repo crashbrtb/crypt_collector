@@ -4,7 +4,7 @@ Arquivo de linguagem para o Total Battle Tools
 Contém todas as strings traduzidas usadas na aplicação
 """
 
-APP_VERSION = "v1.1.1"
+APP_VERSION = "v1.2.2"
 
 # Dicionário de idiomas disponíveis
 LANGUAGES = {
@@ -227,7 +227,10 @@ LOGS = {
         "window_activated_setforegroundwindow": "Janela '{}' ativada via SetForegroundWindow.",
         "closing_main_for_calibration": "Fechando janela principal para calibração...",
         "any_cript_selected": "Modo Any: selecionando próxima cripta sem validação de imagem...",
-        "errors_was_detected": "Erros detectados"
+        "errors_was_detected": "Erros detectados",
+        "script_finish": "--- Script finalizado ---",
+        "status_window_closed": "Janela de status fechada.",
+        "status_window_update_error": "Erro ao atualizar a janela de status."
     },
     "en": {
         "any_cript_selected": "Any mode: selecting next crypt without image validation...",
@@ -297,7 +300,11 @@ LOGS = {
         "error_killing_process": "Error trying to kill process: {}",
         "process_interrupted_by_user": "--- Process Interrupted by User ---",
         "esc_pressed_interrupting": "Esc key pressed. Interrupting...",
-        "time_is_over": "Time is over!"
+        "time_is_over": "Time is over!",
+        "activating_window": "Trying to activate window: {}",
+        "script_finish": "--- Script finished ---",
+        "status_window_closed": "Status window closed.",
+        "status_window_update_error": "Error updating the status window."
     }
 }
 

@@ -1,7 +1,5 @@
 pyautogui
-configparser
 pynput
-screeninfo
 numpy
 keyboard
 pywin32

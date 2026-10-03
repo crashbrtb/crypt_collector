@@ -3,6 +3,7 @@ from tkinter import ttk, messagebox, scrolledtext
 from PIL import Image, ImageTk
 import os
 import configparser
+import shutil
 import subprocess
 import sys
 import threading
@@ -23,31 +24,54 @@ def hide_console():
     except Exception:
         pass
 import timeit
-import cv2
-import numpy as np
+import traceback
 import pyautogui
 import keyboard
 from pynput import mouse
-from screeninfo import get_monitors
 
 from language import UI, LANGUAGES, LOGS, MESSAGES, get_text, APP_VERSION
+import screen_utils
 
 # --- Configurações ---
+# Dois diretórios diferentes quando empacotado pelo PyInstaller:
+#   APP_DIR    - onde fica o docrypt.exe. É o lugar da config, que a calibração
+#                reescreve e que precisa sobreviver a uma reinstalação.
+#   BUNDLE_DIR - onde o PyInstaller extrai os 'datas' (a partir da versão 6 é a
+#                subpasta _internal). É onde estão as imagens de referência.
+# Antes os dois eram o mesmo caminho, e o exe procurava images/ e
+# config_crypt.cfg ao lado de si mesmo, onde o PyInstaller 6 não os coloca.
 if getattr(sys, "frozen", False):
-    SCRIPT_DIR = os.path.dirname(sys.executable)
+    APP_DIR = os.path.dirname(sys.executable)
+    BUNDLE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
     SELF_SCRIPT = sys.executable
 else:
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    APP_DIR = BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
     SELF_SCRIPT = os.path.abspath(__file__)
 
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "config_crypt.cfg")
+SCRIPT_DIR = APP_DIR  # mantido para o cwd dos subprocessos
+CONFIG_FILE = os.path.join(APP_DIR, "config_crypt.cfg")
 
-IMAGE_BASE_DIR = os.path.join(SCRIPT_DIR, "images", "cript")
+
+def ensure_config_file():
+    """Na primeira execução do exe, copia a config empacotada para junto dele."""
+    if os.path.exists(CONFIG_FILE):
+        return
+    bundled = os.path.join(BUNDLE_DIR, "config_crypt.cfg")
+    if bundled != CONFIG_FILE and os.path.exists(bundled):
+        try:
+            shutil.copyfile(bundled, CONFIG_FILE)
+        except OSError as e:
+            print(f"Erro ao criar {CONFIG_FILE}: {e}")
+
+
+IMAGE_BASE_DIR = os.path.join(BUNDLE_DIR, "images", "cript")
 COMMON_DIR = os.path.join(IMAGE_BASE_DIR, "common")
 EPIC_DIR = os.path.join(IMAGE_BASE_DIR, "epic")
 RARE_DIR = os.path.join(IMAGE_BASE_DIR, "rare")
 ICON_SIZE = (64, 64)
 scroll_count = 0
+# Caminho absoluto: antes era "images\\troopsonthemarch.png." (ponto sobrando).
+TROOPS_IMAGE = os.path.join(BUNDLE_DIR, "images", "troopsonthemarch.png")
 
 
 def get_current_language():
@@ -76,11 +100,11 @@ def activate_window_by_title(title):
                 win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
                 time.sleep(0.5)
 
-            print(get_text(LOGS, "maximizing", current_language).format(title))
+            print(get_text(LOGS, "window_maximizing", current_language).format(title))
             win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
             time.sleep(0.5)
 
-            print(get_text(LOGS, "activating", current_language).format(title))
+            print(get_text(LOGS, "window_activating_wscript", current_language).format(title))
             try:
                 shell = win32com.client.Dispatch("WScript.Shell")
                 shell.AppActivate(title)
@@ -88,32 +112,32 @@ def activate_window_by_title(title):
 
                 active_hwnd = win32gui.GetForegroundWindow()
                 if active_hwnd == hwnd:
-                    print(get_text(LOGS, "activation_success", current_language).format(title))
+                    print(get_text(LOGS, "window_activated", current_language).format(title))
                     return True
                 else:
                     print(
-                        get_text(LOGS, "activation_fail", current_language).format(
+                        get_text(LOGS, "window_activation_failed", current_language).format(
                             win32gui.GetWindowText(active_hwnd), active_hwnd
                         )
                     )
 
-                    print(get_text(LOGS, "trying_setforeground", current_language))
+                    print(get_text(LOGS, "trying_setforegroundwindow", current_language))
                     try:
                         win32gui.SetForegroundWindow(hwnd)
                         time.sleep(0.5)
                         active_hwnd = win32gui.GetForegroundWindow()
                         if active_hwnd == hwnd:
-                            print(get_text(LOGS, "setforeground_success", current_language).format(title))
+                            print(get_text(LOGS, "window_activated_setforegroundwindow", current_language).format(title))
                             return True
                         else:
-                            print(get_text(LOGS, "setforeground_fail", current_language))
+                            print(get_text(LOGS, "setforeground_failed", current_language))
                             return False
                     except Exception as set_fg_e:
                         print(get_text(LOGS, "setforeground_error", current_language).format(set_fg_e))
                         return False
 
             except Exception as activate_e:
-                print(get_text(LOGS, "wscript_error", current_language).format(activate_e))
+                print(get_text(LOGS, "wscript_activation_error", current_language).format(activate_e))
                 return False
 
         else:
@@ -140,7 +164,7 @@ def get_image_files(directory):
 
 def get_relative_path(full_path):
     """Converte caminho absoluto para relativo à pasta 'cript'."""
-    rel_path = os.path.relpath(full_path, SCRIPT_DIR).replace("\\", "/")
+    rel_path = os.path.relpath(full_path, BUNDLE_DIR).replace("\\", "/")
     if not rel_path.startswith("images/cript/"):
         parts = full_path.split(os.sep)
         try:
@@ -381,11 +405,24 @@ class ImageSelectorApp:
             self.status_text_widget.config(state="disabled")
 
     def read_process_output(self, process):
-        """Lê a saída do processo em uma thread separada."""
-        for line in iter(process.stdout.readline, ""):
-            self.output_queue.put(line)
-        process.stdout.close()
-        self.output_queue.put(None)
+        """Lê a saída do processo em uma thread separada.
+
+        Blindado de propósito: se esta thread morrer com uma exceção, ninguém
+        fica sabendo (ela roda em background) e a janela de status congela para
+        sempre sem nunca mostrar o fim do script. O finally garante que o sinal
+        de fim seja enviado aconteça o que acontecer.
+        """
+        try:
+            for line in iter(process.stdout.readline, ""):
+                self.output_queue.put(line)
+        except Exception as e:
+            self.output_queue.put(f"\n[erro ao ler a saida do processo: {e!r}]\n")
+        finally:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+            self.output_queue.put(None)
 
     def on_main_window_close(self):
         """Chamado ao fechar a janela principal."""
@@ -422,7 +459,7 @@ class ImageSelectorApp:
                 print(get_text(LOGS, "sending_kill", current_language))
                 self.cripting_process.kill()
                 self.cripting_process.wait(timeout=3)
-                print(get_text(UI, "process_killed", current_language))
+                print(get_text(LOGS, "process_killed", current_language))
             except subprocess.TimeoutExpired:
                 print(get_text(LOGS, "process_not_killed_timeout", current_language))
             except Exception as e:
@@ -650,14 +687,26 @@ class ImageSelectorApp:
         if getattr(sys, "frozen", False):
             cmd = [sys.executable, "--crypting"]
         else:
-            cmd = [sys.executable, SELF_SCRIPT, "--crypting"]
+            cmd = [sys.executable, "-u", SELF_SCRIPT, "--crypting"]
+
+        # PYTHONUNBUFFERED: sem isso o filho usa buffer de bloco de 8 KB no pipe
+        # e a janela de status fica parada em "Iniciando script...".
+        child_env = os.environ.copy()
+        child_env["PYTHONUNBUFFERED"] = "1"
 
         self.cripting_process = subprocess.Popen(
             cmd,
             cwd=SCRIPT_DIR,
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # Tem que casar com o reconfigure do filho (screen_utils
+            # .enable_line_buffering). Com o cp1252 padrão, um caractere fora
+            # da tabela derrubava o filho ou a thread leitora, e a janela de
+            # status congelava sem dizer nada.
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             universal_newlines=True,
             creationflags=creationflags,
@@ -675,32 +724,59 @@ class ImageSelectorApp:
 # --- Lógica de cripta ---
 interrupted = False
 
+# --- Diagnóstico ---
+# O robô passa a maior parte do tempo dentro de chamadas que não imprimem nada.
+# Quando ele "trava", sem isto não dá para saber em que passo parou. O watchdog
+# roda numa thread separada e reporta o passo atual a cada intervalo: se o log
+# para de sair mas o heartbeat continua, o processo está preso naquele passo;
+# se o heartbeat também some, o processo morreu.
+_run_start = time.time()
+_step_lock = threading.Lock()
+_current_step = "iniciando"
+_step_since = time.time()
+
+
+def log(msg):
+    print("[%7.1fs] %s" % (time.time() - _run_start, msg), flush=True)
+
+
+def set_step(name):
+    global _current_step, _step_since
+    with _step_lock:
+        _current_step = name
+        _step_since = time.time()
+
+
+def start_watchdog(interval=15.0):
+    def beat():
+        while True:
+            time.sleep(interval)
+            with _step_lock:
+                step, since = _current_step, _step_since
+            log("heartbeat: parado em '%s' ha %.0fs" % (step, time.time() - since))
+
+    threading.Thread(target=beat, daemon=True).start()
+
 
 def find_image_on_screen(path_image, area, show=False, threshold=0.8):
-    screenshot = pyautogui.screenshot(region=area)
-    screenshot = np.array(screenshot)
-    screenshot_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+    """
+    Procura a imagem dentro da área e devolve o centro em coordenadas de tela.
 
-    if show:
-        cv2.imshow("screenshot", screenshot_gray)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-    selected_image = cv2.imread(path_image, cv2.IMREAD_GRAYSCALE)
-    h, w = selected_image.shape
-
-    result = cv2.matchTemplate(screenshot_gray, selected_image, cv2.TM_CCOEFF_NORMED)
-    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-
-    if max_val >= threshold:
-        top_left = max_loc
-        center_x = top_left[0] + w // 2 + area[0]
-        center_y = top_left[1] + h // 2 + area[1]
-        return center_x, center_y
-    return None
+    A busca é feita em várias escalas (screen_utils.locate), porque os PNGs de
+    referência foram capturados em 1920x1080 e o cv2.matchTemplate não encontra
+    a mesma imagem em outro tamanho.
+    """
+    set_step("procurando %s em %s" % (os.path.basename(path_image), area))
+    started = time.time()
+    result = screen_utils.locate(path_image, area, show=show, threshold=threshold)
+    elapsed = time.time() - started
+    if elapsed > 2.0:
+        log("ATENCAO: busca de %s levou %.1fs" % (os.path.basename(path_image), elapsed))
+    return result
 
 
 def click(x, y):
+    set_step("click(%s,%s)" % (x, y))
     pyautogui.click(x, y)
     time.sleep(2.0)
 
@@ -724,10 +800,12 @@ def verify_store_screen():
 
 
 def search_for_x():
+    set_step("search_for_x")
     image_path = os.path.join(os_dir, "images\\x.png")
     posx = find_image_on_screen(image_path, screen_area)
     if posx is None:
         return False
+    log("x.png encontrado em %s, fechando a janela" % (posx,))
     click(posx[0], posx[1])
     return True
 
@@ -761,42 +839,67 @@ def sleep_with_countdown(s):
 
 
 def open_cript_menu():
+    log("abrindo menu de criptas: watchtower=%s cripts=%s centro=%s"
+        % (cord_click_watchtower, cord_click_cripts, center_of_screen[0]))
     click(cord_click_watchtower[0], cord_click_watchtower[1])
     click(cord_click_cripts[0], cord_click_cripts[1])
     click(center_of_screen[0][0], center_of_screen[0][1])
+    log("menu de criptas aberto")
 
 
 def search_for_cripts(icons):
     mouse_scroll_counter = 0
     max_scroll = 500
+    # Antes o contador voltava a zero e o while nunca terminava: em telas onde
+    # nenhuma imagem casava, o script rolava a lista para sempre.
+    max_restarts = 3
+    restarts = 0
+    log("procurando criptas: %d imagem(ns) na area %s" % (len(icons), area_cript_icons))
+    if not icons:
+        log("ATENCAO: nenhuma imagem selecionada para procurar")
     while mouse_scroll_counter <= max_scroll:
         if interrupted:
             break
         founded_cript = None
+        best_icon, best_score = None, -1.0
         for icon in icons:
             image_path = os.path.join(os_dir, icon)
-            if "rare/2.png" in image_path:
+            # normaliza a barra: com o separador do Windows este teste nunca batia
+            if "rare/2.png" in image_path.replace("\\", "/"):
                 result = find_image_on_screen(image_path, area_cript_icons, False, 0.6)
             else:
                 result = find_image_on_screen(image_path, area_cript_icons)
+            if screen_utils.last_match["score"] > best_score:
+                best_score = screen_utils.last_match["score"]
+                best_icon = icon
             if result:
                 founded_cript = icon
                 break
         if founded_cript:
+            log("cripta encontrada: %s (score %.3f)" % (founded_cript, best_score))
             click(cord_click_go_cript[0], cord_click_go_cript[1])
             return founded_cript
+        # Sem isto era impossivel saber se o robo estava "quase" acertando.
+        log("nenhuma cripta bateu o limiar; melhor palpite %s com score %.3f (escala %s)"
+            % (best_icon, best_score, screen_utils.last_match["scale"]))
+        set_step("rolando a lista de criptas")
         for _ in range(2):
             pyautogui.scroll(-20)
             mouse_scroll_counter = mouse_scroll_counter + 1
             time.sleep(0.2)
-        print(mouse_scroll_counter)
-        if mouse_scroll_counter == max_scroll:
+        log("rolagem acumulada: %d" % mouse_scroll_counter)
+        if mouse_scroll_counter >= max_scroll:
+            restarts = restarts + 1
+            if restarts > max_restarts:
+                print(get_text(LOGS, "error_serch_cript", current_language))
+                return None
             if search_for_x():
                 print(get_text(LOGS, "wrong_windows_opened", current_language))
             open_cript_menu()
             for _ in range(max_scroll):
                 pyautogui.scroll(+20)
             mouse_scroll_counter = 0
+    return None
 
 
 def do_cript(founded_cript):
@@ -838,7 +941,7 @@ def speedup_march():
     if interrupted:
         return False
 
-    result = find_image_on_screen("images\\troopsonthemarch.png.", cord_click_use_speedups_screen)
+    result = find_image_on_screen(TROOPS_IMAGE, cord_click_use_speedups_screen)
     if interrupted:
         return False
 
@@ -857,7 +960,7 @@ def speedup_march():
     while True:
         if interrupted:
             break
-        result = find_image_on_screen("images\\troopsonthemarch.png.", cord_click_use_speedups_screen)
+        result = find_image_on_screen(TROOPS_IMAGE, cord_click_use_speedups_screen)
         if result is None:
             print(get_text(LOGS, "troops_screen_close", current_language))
             break
@@ -932,7 +1035,10 @@ def capture_area():
 
     def end_selection(event):
         global area
-        area = (start_x, start_y, event.x, event.y)
+        # Grava em (left, top, width, height), que é o formato esperado por
+        # pyautogui.screenshot(region=...). Antes gravava os cantos
+        # (x1, y1, x2, y2) e a região de busca saía muito maior que a escolhida.
+        area = screen_utils.corners_to_region((start_x, start_y, event.x, event.y))
         window.destroy()
 
     def on_closing():
@@ -989,20 +1095,34 @@ def scroll_capture():
 
 
 def get_monitor_resolution():
-    monitors = get_monitors()
-    resolutions = [(m.width, m.height) for m in monitors]
-    res = (0, 0, resolutions[0][0], resolutions[0][1])
+    # Mesma fonte que o run_crypting usa para reescalar as coordenadas, e o
+    # mesmo monitor primário que o PIL captura.
+    width, height = screen_utils.get_screen_size()
+    res = (0, 0, width, height)
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE)
 
     if not config.has_section("COORDINATES"):
         config.add_section("COORDINATES")
+    if not config.has_section("Settings"):
+        config.add_section("Settings")
+
+    # Converte de uma vez as áreas que ainda estejam no formato de cantos, para
+    # que o config fique consistente mesmo se a calibração for abortada no meio.
+    if screen_utils.get_config_version(config) < screen_utils.CONFIG_VERSION:
+        for key in screen_utils.LEGACY_CORNER_KEYS:
+            if config.has_option("COORDINATES", key):
+                legacy = screen_utils.parse_value(config.get("COORDINATES", key))
+                if legacy and len(legacy) == 4:
+                    config.set("COORDINATES", key, str(screen_utils.corners_to_region(legacy)))
 
     config.set("COORDINATES", "screen_area", str(res))
+    # Marca que as áreas deste config estão em (left, top, width, height).
+    config.set("Settings", "config_version", str(screen_utils.CONFIG_VERSION))
 
     with open(CONFIG_FILE, "w") as f:
         config.write(f)
-    return resolutions[0][0], resolutions[0][1]
+    return width, height
 
 
 def get_window_size(window_title):
@@ -1015,7 +1135,9 @@ def get_window_size(window_title):
             y = rect[1]
             width = rect[2] - rect[0]
             height = rect[3] - rect[1]
-            return (width, height)
+            # Devolve também a origem: antes só o tamanho era retornado e o
+            # chamador tratava largura/altura como coordenadas de tela.
+            return (x, y, width, height)
         else:
             print(get_text(LOGS, "window_not_found", current_language).format(window_title))
             return None
@@ -1059,41 +1181,51 @@ def calibration(opt, msg, title, type_cap):
     else:
         if opt == "center_of_screen":
             center_position = []
-            center = get_window_size("Total Battle")
-            width_square_distance = int(center[0] / 9)
-            height_square_distance = int(center[1] / 9)
-            posicao = int(center[0] / 2), int(center[1] / 2)
+            rect = get_window_size("Total Battle")
+            if rect is None:
+                # Sem a janela do jogo, usa a tela inteira como referência.
+                rect = (0, 0) + screen_utils.get_screen_size()
+            origin_x, origin_y, window_width, window_height = rect
+            width_square_distance = int(window_width / 9)
+            height_square_distance = int(window_height / 9)
+            center_x = origin_x + int(window_width / 2)
+            center_y = origin_y + int(window_height / 2)
+            posicao = center_x, center_y
             center_position.append(posicao)
             pyautogui.click(posicao)
-            posicao = int(center[0] / 2), int((center[1] / 2) + height_square_distance)
+            posicao = center_x, int(center_y + height_square_distance)
             center_position.append(posicao)
-            posicao = int(center[0] / 2), int((center[1] / 2) - height_square_distance)
+            posicao = center_x, int(center_y - height_square_distance)
             center_position.append(posicao)
-            posicao = int((center[0] / 2) + width_square_distance), int(center[1] / 2)
+            posicao = int(center_x + width_square_distance), center_y
             center_position.append(posicao)
-            posicao = int((center[0] / 2) - width_square_distance), int(center[1] / 2)
+            posicao = int(center_x - width_square_distance), center_y
             center_position.append(posicao)
-            posicao = int((center[0] / 2) + width_square_distance / 2), int(
-                (center[1] / 2) + height_square_distance / 2
-            )
+            posicao = int(center_x + width_square_distance / 2), int(center_y + height_square_distance / 2)
             center_position.append(posicao)
-            posicao = int((center[0] / 2) - width_square_distance / 2), int(
-                (center[1] / 2) - height_square_distance / 2
-            )
+            posicao = int(center_x - width_square_distance / 2), int(center_y - height_square_distance / 2)
             center_position.append(posicao)
-            posicao = int((center[0] / 2) + width_square_distance / 2), int(
-                (center[1] / 2) - height_square_distance / 2
-            )
+            posicao = int(center_x + width_square_distance / 2), int(center_y - height_square_distance / 2)
             center_position.append(posicao)
-            posicao = int((center[0] / 2) - width_square_distance / 2), int(
-                (center[1] / 2) + height_square_distance / 2
-            )
+            posicao = int(center_x - width_square_distance / 2), int(center_y + height_square_distance / 2)
             center_position.append(posicao)
             config.set("COORDINATES", opt, str(center_position))
             print(opt, "->", center_position)
         else:
             config.set("COORDINATES", opt, str(cord_click))
             print(opt, "-", cord_click)
+            # A área do botão Explorar era gravada só em
+            # verify_if_open_explorer_button, mas o crypting lê cord_explore_button:
+            # o valor de Full HD ficava preso lá e o botão nunca era achado.
+            if opt == "verify_if_open_explorer_button":
+                config.set("COORDINATES", "cord_explore_button", str(cord_click))
+                print("cord_explore_button -", cord_click)
+            # cord_click_go_cript nunca era calibrado. Deriva do centro da área
+            # do botão Go, que acabou de ser capturada.
+            if opt == "area_menu_button_go_cript" and len(cord_click) == 4:
+                go_click = (cord_click[0] + cord_click[2] // 2, cord_click[1] + cord_click[3] // 2)
+                config.set("COORDINATES", "cord_click_go_cript", str(go_click))
+                print("cord_click_go_cript -", go_click)
 
     with open(CONFIG_FILE, "w") as f:
         config.write(f)
@@ -1187,48 +1319,77 @@ def run_crypting():
     global cord_explore_button
 
     interrupted = False
+    # Sem isto os prints ficam presos no buffer do pipe e a janela de status
+    # nunca sai de "Iniciando script...".
+    screen_utils.enable_line_buffering()
     keyboard.add_hotkey("esc", on_esc_press)
 
-    os_dir = SCRIPT_DIR
-    config_path = os.path.join(os_dir, "config_crypt.cfg")
+    os_dir = BUNDLE_DIR
+    config_path = CONFIG_FILE
     config = configparser.ConfigParser()
     config.read(config_path)
     if "COORDINATES" not in config:
         print(f"Error: Could not find [COORDINATES] section in {config_path}")
         return
 
-    how_many_cripts = eval(config["COORDINATES"]["how_many_cripts"])
-    cord_click_watchtower = eval(config["COORDINATES"]["cord_click_watchtower"])
-    cord_click_cripts = eval(config["COORDINATES"]["cord_click_cripts"])
-    area_menu_button_go_cript = eval(config["COORDINATES"]["area_menu_button_go_cript"])
-    cord_speedup_march = eval(config["COORDINATES"]["cord_speedup_march"])
-    center_of_screen = eval(config["COORDINATES"]["center_of_screen"])
-    cord_click_use_speedups_screen = eval(config["COORDINATES"]["cord_click_use_speedups_screen"])
-    cord_click_use_speedups = eval(config["COORDINATES"]["cord_click_use_speedups"])
-    how_many_speedups = eval(config["COORDINATES"]["how_many_speedups"])
-    screen_area = eval(config["COORDINATES"]["screen_area"])
-    open_button = eval(config["COORDINATES"]["open_button"])
-    test = eval(config["COORDINATES"]["test"])
-    area_cript_icons = eval(config["COORDINATES"]["area_cript_icons"])
-    cord_click_go_cript = eval(config["COORDINATES"]["cord_click_go_cript"])
-    search_cript = eval(config["COORDINATES"]["search_cript"])
-    rare_cript = eval(config["COORDINATES"]["rare_cript"])
-    any_cript = False
-    if "any_cript" in config["COORDINATES"]:
-        try:
-            any_cript = eval(config["COORDINATES"]["any_cript"])
-        except Exception:
-            any_cript = config["COORDINATES"].getboolean("any_cript", fallback=False)
-    elif search_cript == ["any"] or search_cript == "any":
-        any_cript = True
-    cord_explore_button = eval(config["COORDINATES"]["cord_explore_button"])
+    # Converte o formato antigo das áreas e reescala tudo da resolução usada na
+    # calibração para a resolução atual. Em um monitor igual ao da calibração o
+    # fator é 1.0 e nada muda.
+    try:
+        coords = screen_utils.load_coordinates(config)
+    except Exception:
+        print(f"Error: invalid [COORDINATES] section in {config_path}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        return
+    missing = [
+        k
+        for k in (
+            "cord_click_watchtower",
+            "cord_click_cripts",
+            "center_of_screen",
+            "open_button",
+            "cord_speedup_march",
+            "cord_click_use_speedups",
+            "cord_click_use_speedups_screen",
+            "area_cript_icons",
+            "cord_click_go_cript",
+        )
+        if k not in coords
+    ]
+    if missing:
+        print("Error: missing calibration keys: %s" % ", ".join(missing), flush=True)
+        return
+
+    how_many_cripts = coords["how_many_cripts"]
+    cord_click_watchtower = coords["cord_click_watchtower"]
+    cord_click_cripts = coords["cord_click_cripts"]
+    area_menu_button_go_cript = coords.get("area_menu_button_go_cript")
+    cord_speedup_march = coords["cord_speedup_march"]
+    center_of_screen = coords["center_of_screen"]
+    cord_click_use_speedups_screen = coords["cord_click_use_speedups_screen"]
+    cord_click_use_speedups = coords["cord_click_use_speedups"]
+    how_many_speedups = coords["how_many_speedups"]
+    screen_area = coords["screen_area"]
+    open_button = coords["open_button"]
+    test = coords["test"]
+    area_cript_icons = coords["area_cript_icons"]
+    cord_click_go_cript = coords["cord_click_go_cript"]
+    search_cript = coords["search_cript"]
+    rare_cript = coords["rare_cript"]
+    any_cript = coords["any_cript"]
+    cord_explore_button = coords["cord_explore_button"]
     counter = 0
     errors = 0
 
+    log("modo Any: %s | criptas alvo: %s | imagens: %s"
+        % (any_cript, how_many_cripts, len(search_cript) if search_cript else 0))
+    start_watchdog()
+
     try:
-        for _ in range(how_many_cripts):
+        for volta in range(how_many_cripts):
             if interrupted:
                 break
+            log("--- volta %d/%d ---" % (volta + 1, how_many_cripts))
             if search_for_x():
                 print(get_text(LOGS, "store_screen_close", current_language))
             open_cript_menu()
@@ -1285,6 +1446,12 @@ def run_crypting():
             if interrupted:
                 break
 
+    except Exception:
+        # Sem isto o sys.exit() do finally substituía a exceção em voo por
+        # SystemExit e o traceback nunca chegava à janela de status.
+        print("\n------------------------------------", flush=True)
+        print(traceback.format_exc(), flush=True)
+        print("------------------------------------", flush=True)
     finally:
         if interrupted:
             print("\n------------------------------------")
@@ -1298,18 +1465,57 @@ def run_crypting():
                 print(f"Erro ao remover hotkeys: {e}", flush=True)
 
         print(get_text(LOGS, "script_finish", current_language), flush=True)
-        sys.exit()
+        # Sem sys.exit() aqui: dentro de um finally ele substituía qualquer
+        # exceção em voo por SystemExit. Quem encerra é o chamador.
+
+
+def run_guarded(entry):
+    """
+    Executa um modo do app garantindo que o processo sempre termine.
+
+    Medido neste projeto: um exe PyInstaller windowed (console=False) que sofre
+    uma exceção não tratada NÃO encerra - fica vivo indefinidamente segurando o
+    pipe. O launcher então nunca recebe o fim da saída, a janela de status
+    congela na última linha e o robô parece ter travado do nada. Isso acontece
+    tanto com disable_windowed_traceback=True quanto False; a flag não resolve.
+
+    Aqui nenhuma exceção escapa, o traceback vai para a janela de status, e o
+    os._exit() encerra na hora sem depender de threads pendentes.
+    """
+    code = 0
+    try:
+        entry()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 0
+    except BaseException:
+        screen_utils.enable_line_buffering()
+        print("\n=== ERRO NAO TRATADO ===", flush=True)
+        print(traceback.format_exc(), flush=True)
+        code = 1
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    os._exit(code)
 
 
 # --- Execução Principal ---
 if __name__ == "__main__":
     hide_console()
+    # Antes de ler o idioma: na primeira execução do exe a config ainda não
+    # existe ao lado dele.
+    ensure_config_file()
     current_language = get_current_language()
 
+    # Só os modos que trabalham com coordenadas de tela precisam ser DPI aware.
+    # A janela principal fica de fora para não encolher a interface em telas
+    # com escala do Windows acima de 100%.
     if "--crypting" in sys.argv:
-        run_crypting()
+        screen_utils.enable_dpi_awareness()
+        run_guarded(run_crypting)
     elif "--calibration" in sys.argv:
-        run_calibration_mode()
+        screen_utils.enable_dpi_awareness()
+        run_guarded(run_calibration_mode)
     else:
         if not os.path.isdir(COMMON_DIR):
             print(f"Criando diretório ausente: {COMMON_DIR}")
@@ -1321,6 +1527,9 @@ if __name__ == "__main__":
             print(f"Criando diretório ausente: {RARE_DIR}")
             os.makedirs(RARE_DIR, exist_ok=True)
 
-        root = tk.Tk()
-        app = ImageSelectorApp(root)
-        root.mainloop()
+        def _gui():
+            root = tk.Tk()
+            app = ImageSelectorApp(root)
+            root.mainloop()
+
+        run_guarded(_gui)

@@ -6,7 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('images', 'images'), ('config_crypt.cfg', '.')],
-    hiddenimports=[],
+    hiddenimports=['screen_utils', 'language'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -27,7 +27,12 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    disable_windowed_traceback=False,
+    # Evita o diálogo modal de traceback, que num processo lançado com
+    # CREATE_NO_WINDOW ninguém veria. Atenção: isto NÃO resolve travamento.
+    # Medido: um exe windowed com exceção não tratada fica vivo indefinidamente
+    # com esta flag em True *ou* False. Quem garante o encerramento é o
+    # try/except + os._exit() em volta de cada modo no docrypt.py.
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

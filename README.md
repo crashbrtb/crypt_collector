@@ -14,8 +14,8 @@ How to use
 1. Open the Total Battle game (installed version; does not work in the web version).
 2. In the Crypts and Arena menu, select one crypt type (common, rare, or epic) and a level.
 3. Select only the captain Carter (no other captain selected).
-4. Run `docrypt.exe` or `launcher.py`.
-5. The app is calibrated for 1080p and a maximized game window. If your setup is different, click **Calibrate** and follow the instructions. You only need to calibrate once.
+4. Run `docrypt.exe` (or `start.bat` when running from source).
+5. The bundled calibration was captured at 1080p with a maximized game window. Other resolutions are handled automatically: coordinates and reference images are rescaled to your screen. For exact results on a different resolution, click **Calibrate** and follow the instructions - you only need to do it once.
 6. In the app, select the same crypt type you selected in the game menu, choose the quantity, and click **Start**.
 
 Video Tutorial
