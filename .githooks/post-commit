@@ -1,0 +1,24 @@
+#!/bin/sh
+# Mantém o arquivo VERSION igual à versão do git.
+#
+# Neste repositório a mensagem do commit de uma versão começa com o número dela
+# ("2.0.1", "2.1.0 - feat: ..."). Quando é o caso, este hook grava o número no
+# arquivo VERSION e o inclui no próprio commit, de modo que o arquivo, o commit
+# e o executável empacotado digam sempre a mesma versão.
+#
+# Ativação, uma vez por clone:  git config core.hooksPath .githooks
+
+[ -n "$CRYPT_VERSION_SYNC" ] && exit 0
+
+version=$(git log -1 --pretty=%s | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+[ -z "$version" ] && exit 0
+
+cd "$(git rev-parse --show-toplevel)" || exit 0
+current=$(tr -d ' \r\n' < VERSION 2>/dev/null)
+[ "$current" = "$version" ] && exit 0
+
+printf '%s\n' "$version" > VERSION
+git add VERSION
+# "-- VERSION" limita a emenda a este arquivo: o que mais estiver no index fica de fora.
+CRYPT_VERSION_SYNC=1 git commit --amend --no-edit --no-verify --quiet -- VERSION
+echo "VERSION -> $version"

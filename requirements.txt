@@ -1,7 +1,10 @@
-pyautogui
-pynput
-numpy
-keyboard
-pywin32
-opencv-python
-Pillow
+# Navegador (CDP)
+websocket-client>=1.7.0
+
+# Imagem
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Interface
+customtkinter>=5.2.0
