@@ -72,6 +72,10 @@ STEPS: List[Step] = [
     # os dois passos dela são opcionais e o assistente deixa adiá-los para o fim.
     Step("store_marker", "region", optional=True),
     Step("store_close_button", "region", acts=True, optional=True),
+    # As duas casas vizinhas medem a grade do mapa. Vêm antes da cripta porque o
+    # clique nela abre uma janela por cima do mapa.
+    Step("map_neighbor_a", "click", optional=True),
+    Step("map_neighbor_b", "click", optional=True),
     Step("crypt_on_map", "click", acts=True),
     Step("open_button", "click", acts=True, optional=True),
     Step("explore_button", "region", acts=True),
@@ -82,6 +86,7 @@ STEPS: List[Step] = [
 
 STEPS_BY_NAME = {step.name: step for step in STEPS}
 STORE_STEPS = ("store_marker", "store_close_button")
+MAP_NEIGHBOR_STEPS = ("map_neighbor_a", "map_neighbor_b")
 
 
 class Calibration:
@@ -186,6 +191,22 @@ class Calibration:
             return None
         scale_x, scale_y = self._factors(name)
         return (int(round(raw[0] * scale_x)), int(round(raw[1] * scale_y)))
+
+    def map_grid(self) -> Optional[Tuple[Point, Point]]:
+        """
+        Os dois deslocamentos da grade do mapa: da cripta até cada casa vizinha marcada.
+
+        None quando as vizinhas não foram calibradas, ou quando as duas ficam na
+        mesma linha (opostas, ou a mesma casa) e por isso não definem a grade.
+        """
+        centre = self.point("crypt_on_map")
+        marks = [self.point(name) for name in MAP_NEIGHBOR_STEPS]
+        if not centre or not all(marks):
+            return None
+        (ax, ay), (bx, by) = [(mark[0] - centre[0], mark[1] - centre[1]) for mark in marks]
+        if abs(ax * by - ay * bx) < 0.2 * max(1, ax * ax + ay * ay, bx * bx + by * by):
+            return None
+        return (ax, ay), (bx, by)
 
     def region(self, name: str) -> Optional[Region]:
         raw = self.regions.get(name)

@@ -195,6 +195,31 @@ class Browser:
         self.refresh_dpr()
         logger.info(f"Connected to tab: {(tab.get('url') or '')[:90]}")
 
+    def reload(self):
+        """Recarrega a página do jogo (F5). O jogo volta logado, pelo perfil do navegador."""
+        self.send("Page.reload", {"ignoreCache": False})
+
+    def reopen_game(self):
+        """
+        Abre o jogo de novo quando a aba não responde mais: aba nova, e a antiga fechada.
+
+        Uma aba travada não atende nem ao pedido de recarregar, que passa por
+        ela; abrir e fechar abas passa pelo navegador. A aba nova vem antes de
+        fechar a antiga porque fechar a última aba encerra o Chrome. Se o
+        navegador inteiro foi fechado, ele é aberto de novo.
+        """
+        self.disconnect()
+        if self.is_cdp_ready():
+            old = self.find_game_tab()
+            try:
+                self._http(f"/json/new?{self.game_url}", timeout=5.0, method="PUT")
+                if old and old.get("id"):
+                    self._http(f"/json/close/{old['id']}", timeout=5.0)
+                    time.sleep(1.0)
+            except (OSError, urllib.error.URLError, ValueError) as exc:
+                logger.debug(f"reopen_game: {exc}")
+        self.open_game()
+
     def ensure_attached(self):
         """Reconecta se a conexão caiu (aba recarregada, navegador reaberto)."""
         if self.ws is None:

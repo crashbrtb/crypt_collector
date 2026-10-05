@@ -30,8 +30,11 @@ ICON_THRESHOLDS = {"rare/2.png": 0.6}
 # As imagens de images/ vieram do cliente instalado em 1920x1080.
 BUNDLED_IMAGE_SIZE = (1920, 1080)
 
-# Depois de tantas voltas seguidas sem conseguir, continuar só repetiria o erro.
+# A cada tantas voltas seguidas sem conseguir, a execução recarrega o jogo e
+# tenta de novo - ela não para sozinha.
 MAX_CONSECUTIVE_FAILURES = 5
+FAILURE_PAUSE = 30.0            # entre duas tentativas de reabrir o jogo
+GAME_LOAD_WAIT = 45.0           # do carregamento da página até o mapa aparecer
 
 LIST_END_CHANGE = 0.005         # abaixo disto a lista não se moveu: chegou ao fim
 SCROLL_SETTLE = 0.6
@@ -109,6 +112,7 @@ class Collector:
         self.max_scrolls = int(timing.get("max_scrolls", 80))
         self.list_passes = max(1, int(timing.get("list_passes", 3)))
         self.march_timeout = float(timing.get("march_timeout", 1800))
+        self.game_load_wait = float(timing.get("game_load_wait", GAME_LOAD_WAIT))
 
     # -------------------------------------------------------------- preparação
     def preflight(self) -> List[str]:
@@ -156,17 +160,16 @@ class Collector:
         logger.info(tr("run.start", target=self.target,
                        mode=tr("mode.any") if self.any_mode else tr("run.images", count=len(self.selected))))
 
+        # Uma volta que falha não conta: a execução só termina com a quantidade
+        # pedida explorada, ou quando o usuário a interrompe.
         done = failures = streak = 0
-        for round_number in range(1, self.target + 1):
+        while done < self.target:
             cancellation.check()
-            logger.info(tr("run.round", round=round_number, target=self.target))
+            logger.info(tr("run.round", round=done + 1, target=self.target))
             try:
                 success = self.collect_one()
             except BrowserError as exc:
-                # A aba pode ter sido recarregada; uma reconexão resolve.
-                logger.warning(tr("run.reconnecting", error=exc))
-                self.browser.attach()
-                self.sync_viewport()
+                self.reconnect(exc)
                 success = False
 
             if success:
@@ -176,11 +179,57 @@ class Collector:
                 failures += 1
                 streak += 1
             logger.info(tr("run.progress", done=done, target=self.target, failures=failures))
-            if streak >= MAX_CONSECUTIVE_FAILURES:
-                logger.error(tr("run.too_many_failures", count=streak))
-                break
+            if not success:
+                self.recover(streak)
 
         return {"done": done, "failures": failures, "target": self.target}
+
+    def recover(self, streak: int):
+        """
+        Deixa o jogo pronto para a próxima volta depois de uma que falhou.
+
+        Uma janela que ficou aberta (a de uma cripta errada, uma oferta) taparia
+        os cliques seguintes, e a volta nova falharia pelo mesmo motivo.
+        """
+        try:
+            if streak and streak % MAX_CONSECUTIVE_FAILURES == 0:
+                # Tantas falhas seguidas indicam o jogo preso em alguma tela:
+                # recarregar a página o devolve ao mapa.
+                logger.error(tr("run.too_many_failures", count=streak))
+                self.browser.reload()
+                cancellation.sleep(self.game_load_wait)
+                self.sync_viewport()
+            self.close_store() or self.close_window()
+            self.browser.press_escape()
+        except BrowserError as exc:
+            self.reconnect(exc)
+        cancellation.sleep(0.5)
+
+    def reconnect(self, error: Exception):
+        """
+        Recupera a conexão com o jogo, insistindo até conseguir.
+
+        Uma aba recarregada só precisa de uma conexão nova. Se nem isso
+        funciona - aba travada, navegador fechado - o jogo é aberto de novo.
+        """
+        logger.warning(tr("run.reconnecting", error=error))
+        reopen = False
+        while True:
+            cancellation.check()
+            try:
+                if reopen:
+                    logger.warning(tr("run.reopening"))
+                    self.browser.reopen_game()
+                    cancellation.sleep(self.game_load_wait)
+                else:
+                    self.browser.attach()
+                self.sync_viewport()
+                return
+            except BrowserError as exc:
+                logger.warning(tr("run.reconnect_failed", error=exc))
+                if reopen:
+                    cancellation.sleep(FAILURE_PAUSE)
+                reopen = True
 
     def collect_one(self) -> bool:
         self.close_store()
@@ -365,15 +414,33 @@ class Collector:
     # ------------------------------------------------------------------ cripta
     def _tile(self) -> Tuple[int, int]:
         """Distância, na tela, entre uma casa do mapa e as vizinhas dela."""
+        grid = self.calibration.map_grid()
+        if grid:
+            (ax, ay), (bx, by) = grid
+            return max(abs(ax), abs(bx)), max(abs(ay), abs(by))
         return self.viewport[0] // 9, self.viewport[1] // 9
+
+    def _crypt_offsets(self) -> List[Point]:
+        """
+        A cripta e as oito casas em volta dela, como deslocamentos do ponto calibrado.
+
+        Com as duas casas vizinhas calibradas a grade é medida: as outras seis
+        saem dos dois deslocamentos (os opostos, a soma e a diferença). Sem
+        elas, a distância entre as casas é estimada pelo tamanho da página.
+        """
+        grid = self.calibration.map_grid()
+        if grid:
+            (ax, ay), (bx, by) = grid
+            return [(0, 0), (ax, ay), (-ax, -ay), (bx, by), (-bx, -by),
+                    (ax + bx, ay + by), (-ax - bx, -ay - by), (ax - bx, ay - by), (bx - ax, by - ay)]
+        dx, dy = self._tile()
+        return [(0, 0), (0, dy), (0, -dy), (dx, 0), (-dx, 0),
+                (dx // 2, dy // 2), (-dx // 2, -dy // 2), (dx // 2, -dy // 2), (-dx // 2, dy // 2)]
 
     def _crypt_points(self) -> List[Point]:
         """O ponto calibrado da cripta e os pontos em volta dele, para quando ela não cai no centro."""
         x, y = self.calibration.point("crypt_on_map")
-        dx, dy = self._tile()
-        offsets = [(0, 0), (0, dy), (0, -dy), (dx, 0), (-dx, 0),
-                   (dx // 2, dy // 2), (-dx // 2, -dy // 2), (dx // 2, -dy // 2), (-dx // 2, dy // 2)]
-        return [(x + ox, y + oy) for ox, oy in offsets]
+        return [(x + ox, y + oy) for ox, oy in self._crypt_offsets()]
 
     # A cripta no mapa
     # ----------------
@@ -392,7 +459,8 @@ class Collector:
     def _map_area(self) -> Region:
         """A vizinhança do ponto calibrado: todas as posições possíveis, com folga para o recorte."""
         x, y = self.calibration.point("crypt_on_map")
-        dx, dy = self._tile()
+        offsets = self._crypt_offsets()
+        dx, dy = max(abs(ox) for ox, _ in offsets), max(abs(oy) for _, oy in offsets)
         reach = 2 * self._sprite_half()
         return (x - dx - reach, y - dy - reach, 2 * (dx + reach), 2 * (dy + reach))
 
@@ -493,17 +561,10 @@ class Collector:
             positions = [guess] + [p for p in positions
                                    if abs(p[0] - guess[0]) > near or abs(p[1] - guess[1]) > near]
 
-        opened = False
         for attempt, position in enumerate(positions):
             cancellation.check()
             if attempt > 0:
                 logger.info(tr("run.explore_retry", attempt=attempt + 1, total=len(positions)))
-                # Só há o que fechar se o clique anterior abriu alguma coisa.
-                if opened:
-                    self.close_store() or self.close_window()
-                    if attempt > 2:
-                        self.browser.press_escape()
-                        cancellation.sleep(0.5)
 
             before = self.browser.capture(watched)
             self.click(position)
@@ -511,18 +572,24 @@ class Collector:
             # onde os botões apareceriam, não vale procurar por eles - nem
             # clicar às cegas na posição do Abrir, que ali ainda é mapa.
             opened = changed_fraction(before, self.browser.capture(watched)) >= WINDOW_OPENED_CHANGE
-            if not opened:
-                continue
-
-            explore = self._find_explore()
-            if explore is None and open_button:
-                self.click(open_button)
+            if opened:
                 explore = self._find_explore()
-            if explore is not None:
-                if position != guess:
-                    self._learn_map_sprite(snapshot, origin, position, crypt)
-                self.click(explore)
-                return True
+                if explore is None and open_button:
+                    self.click(open_button)
+                    explore = self._find_explore()
+                if explore is not None:
+                    if position != guess:
+                        self._learn_map_sprite(snapshot, origin, position, crypt)
+                    self.click(explore)
+                    return True
+
+            # O clique caiu em outro objeto do mapa: o jogo abre um popup com as
+            # informações dele, que taparia o próximo clique. Ele pode aparecer
+            # fora da área dos botões, então o X é procurado mesmo sem `opened`.
+            closed = self.close_store() or self.close_window()
+            if opened and not closed:
+                self.browser.press_escape()
+                cancellation.sleep(0.5)
         return False
 
     # ------------------------------------------------------------------ marcha

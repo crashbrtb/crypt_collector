@@ -69,12 +69,19 @@ crypts are the ones that show the Open button.
 | 5 | Go button | button area | Go button of the first crypt |
 | 6 | Store open | validation area, optional | A fixed part of the store, such as the Bonus Sales icon. This is how the store is recognised |
 | 7 | Close store (X) | button area, optional | The X of the store. Clicked to close it |
-| 8 | Crypt on the map | click point | |
-| 9 | Open button | click point, optional | Only rare crypts show it. Skip it if Explore is already on screen |
-| 10 | Explore button | button area | Sends the march |
-| 11 | Speed up button | click point | |
-| 12 | March icon | validation area | The three marching soldiers on the speedup screen |
-| 13 | Use button | click point | Uses one speedup |
+| 8 | Neighbouring tile 1 (right) | reference point, optional | Centre of the tile immediately to the right of the crypt. Nothing is clicked |
+| 9 | Neighbouring tile 2 (below) | reference point, optional | Centre of the tile immediately below the crypt. Nothing is clicked |
+| 10 | Crypt on the map | click point | |
+| 11 | Open button | click point, optional | Only rare crypts show it. Skip it if Explore is already on screen |
+| 12 | Explore button | button area | Sends the march |
+| 13 | Speed up button | click point | |
+| 14 | March icon | validation area | The three marching soldiers on the speedup screen |
+| 15 | Use button | click point | Uses one speedup |
+
+**The neighbouring tiles.** After some crypts the game stops centring the map on the crypt, and it
+shows up on one of the eight tiles around the centre. Steps 8 and 9 measure the map grid, so those
+eight positions are calculated instead of guessed. Without them the distance between tiles is
+estimated from the page size, which may miss.
 
 **The store.** The game often opens the store by itself right after Go, but not every time. If it
 did not open when you reach step 6, click **Leave the store for the end**: the two store steps move

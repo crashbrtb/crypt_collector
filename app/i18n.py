@@ -138,8 +138,12 @@ TEXTS = {
                      "{done}/{target} crypts explored · {failures} error(s)"),
     "run.reconnecting": ("Conexão com o jogo perdida ({error}); reconectando...",
                          "Connection to the game lost ({error}); reconnecting..."),
-    "run.too_many_failures": ("{count} voltas seguidas sem sucesso; execução encerrada.",
-                              "{count} rounds in a row without success; run stopped."),
+    "run.too_many_failures": ("{count} voltas seguidas sem sucesso; recarregando o jogo (F5)...",
+                              "{count} rounds in a row without success; reloading the game (F5)..."),
+    "run.reopening": ("O jogo não responde; abrindo o jogo de novo no navegador...",
+                      "The game is not responding; opening the game again in the browser..."),
+    "run.reconnect_failed": ("Ainda sem conexão com o jogo ({error}); tentando de novo...",
+                             "Still no connection to the game ({error}); trying again..."),
     "run.store_closed": ("Loja fechada.", "Store closed."),
     "run.popup_closed": ("Janela aberta fechada.", "Open window closed."),
     "run.any_selected": ("Modo Qualquer: indo para a primeira cripta da lista.",
@@ -198,6 +202,7 @@ TEXTS = {
     "wizard.progress": ("Passo {current} de {total}", "Step {current} of {total}"),
     "wizard.optional": ("opcional", "optional"),
     "wizard.kind_click": ("ponto de clique — será clicado no jogo", "click point — will be clicked in the game"),
+    "wizard.kind_point": ("ponto de referência — nada é clicado", "reference point — nothing is clicked"),
     "wizard.kind_button_area": ("área de botão — o centro será clicado no jogo",
                                 "button area — its centre will be clicked in the game"),
     "wizard.kind_validation_area": ("área de validação — nada é clicado",
@@ -317,6 +322,22 @@ TEXTS = {
         "Mark the area of the X that CLOSES the store, tightly.\n"
         "The centre of the area will be clicked and the store will close. The image of the X is also used "
         "to close other windows left open."),
+    "step.map_neighbor_a.title": ("Casa vizinha 1 (direita)", "Neighbouring tile 1 (right)"),
+    "step.map_neighbor_a.text": (
+        "Com a cripta no centro do mapa, clique no CENTRO da casa imediatamente À DIREITA da cripta.\n"
+        "Marque o mesmo lugar da casa em que você vai clicar na cripta (o meio dela). Nada é clicado no "
+        "jogo: o ponto só mede a distância entre as casas do mapa.",
+        "With the crypt at the centre of the map, click the CENTRE of the tile immediately to the RIGHT "
+        "of the crypt.\n"
+        "Mark the same spot of the tile where you will click the crypt (its middle). Nothing is clicked "
+        "in the game: the point only measures the distance between map tiles."),
+    "step.map_neighbor_b.title": ("Casa vizinha 2 (abaixo)", "Neighbouring tile 2 (below)"),
+    "step.map_neighbor_b.text": (
+        "Agora clique no CENTRO da casa imediatamente ABAIXO da cripta.\n"
+        "Com esta e a anterior, as oito casas em volta da cripta são calculadas. Nada é clicado no jogo.",
+        "Now click the CENTRE of the tile immediately BELOW the crypt.\n"
+        "With this one and the previous one, the eight tiles around the crypt are worked out. Nothing "
+        "is clicked in the game."),
     "step.crypt_on_map.title": ("Cripta no mapa", "Crypt on the map"),
     "step.crypt_on_map.text": ("Clique na CRIPTA, no mapa.", "Click the CRYPT, on the map."),
     "step.open_button.title": ("Botão Abrir", "Open button"),

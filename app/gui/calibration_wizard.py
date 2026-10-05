@@ -309,7 +309,7 @@ class CalibrationWizard(ctk.CTkToplevel):
     def _show_step(self):
         step = self._current()
         if not step.is_rectangle:
-            kind = "wizard.kind_click"
+            kind = "wizard.kind_click" if step.acts else "wizard.kind_point"
         elif step.acts:
             kind = "wizard.kind_button_area"
         else:
