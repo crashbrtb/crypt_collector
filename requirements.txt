@@ -1,9 +1,9 @@
-# Navegador (CDP)
+# Conexão com a aba do jogo (CDP) e download dos dados do jogo
 websocket-client>=1.7.0
+requests>=2.31.0
 
-# Imagem
-opencv-python>=4.8.0
-numpy>=1.24.0
+# Imagens do jogo (bundles Unity com LZ4)
+lz4>=4.3.0
 Pillow>=10.0.0
 
 # Interface

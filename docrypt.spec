@@ -9,12 +9,13 @@ a = Analysis(
     pathex=[],
     binaries=[],
     # customtkinter carrega os temas (json) e as fontes de dentro do pacote.
-    datas=[('images', 'images'), ('VERSION', '.'), ('Logo-crypt.ico', '.')] + collect_data_files('customtkinter'),
+    datas=[('VERSION', '.'), ('Logo-crypt.ico', '.')] + collect_data_files('customtkinter'),
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Puxados por dependências opcionais (Pillow, requests); o app não usa.
+    excludes=['numpy', 'cv2', 'cryptography', 'setuptools', 'pkg_resources'],
     noarchive=False,
     optimize=0,
 )

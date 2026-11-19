@@ -1,625 +1,539 @@
 """
-A execução: abrir a lista de criptas, escolher uma, explorar e acelerar a marcha.
+O laço do coletor: até 3 capitães explorando criptas ao mesmo tempo, tudo pela rede.
 
-Parte do princípio de que o jogo já está aberto e logado em um Chrome com CDP.
-Este módulo não abre navegador nem faz login: se a aba do jogo não for
-encontrada, a execução para com uma mensagem dizendo isso.
+Cada "faixa" é um capitão com uma família e um nível de cripta (ex. Épica 35) e um ou mais
+tipos desse nível. A cada volta do laço, para cada faixa:
+
+  capitão em casa e faltando criptas -> escolhe a cripta livre mais perto da cidade,
+      confere que ela ainda existe, não vence antes da marcha chegar e não tem marcha de
+      ninguém indo para ela (bloco do mapa), reserva, abre (rara, com a chave), manda o
+      capitão com o alcatrão e acelera a marcha;
+  capitão fora numa marcha nossa -> acompanha: acelera a volta se der e, quando ele chega,
+      confere se a cripta acabou e aprende quanto alcatrão o capitão gasta.
+
+Duas faixas nunca escolhem a mesma cripta (reserva) e uma cripta com marcha de outro
+jogador a caminho fica de fora.
+
+Vigia: se a aba do jogo parar de mandar pedidos (o erro do Unity que trava o jogo) ou
+parar de responder, a página é recarregada (F5); se o jogo não voltar, o Chrome é fechado
+e aberto de novo. As marchas continuam no servidor e o laço retoma de onde estava.
 """
+from __future__ import annotations
 
-import os
+import math
 import time
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
 
-import cv2
-import numpy as np
-
-from .browser import Browser, BrowserError
-from .calibration import Calibration
-from .cancel import cancellation
+from . import catalog as catalog_mod
+from . import gear as gear_mod
+from .cancel import Cancelled, CancelToken
+from .game import Game
+from .gamelink import GameError, GameLink, LinkDown
 from .i18n import tr
 from .logger import logger
-from .paths import CRYPT_IMAGES_DIR, FALLBACK_CLOSE_IMAGE
-from .settings import ANY_MODE, CRYPT_TYPES, Settings
-from .vision import WIDE_SCALES, Hit, Region, Vision, changed_fraction, expand, ladder
 
-Point = Tuple[int, int]
-
-# Ícones que só casam com um limiar mais baixo que o geral.
-ICON_THRESHOLDS = {"rare/2.png": 0.6}
-
-# As imagens de images/ vieram do cliente instalado em 1920x1080.
-BUNDLED_IMAGE_SIZE = (1920, 1080)
-
-# A cada tantas voltas seguidas sem conseguir, a execução recarrega o jogo e
-# tenta de novo - ela não para sozinha.
-MAX_CONSECUTIVE_FAILURES = 5
-FAILURE_PAUSE = 30.0            # entre duas tentativas de reabrir o jogo
-GAME_LOAD_WAIT = 45.0           # do carregamento da página até o mapa aparecer
-
-LIST_END_CHANGE = 0.005         # abaixo disto a lista não se moveu: chegou ao fim
-SCROLL_SETTLE = 0.6
-
-# A cripta no mapa é procurada pelo recorte memorizado dela. O limiar é baixo de
-# propósito: o terreno em volta muda de uma cripta para outra, e um palpite
-# errado custa só um clique antes de cair na busca pelas posições vizinhas.
-MAP_MATCH_THRESHOLD = 0.6
-WINDOW_OPENED_CHANGE = 0.2      # acima disto, o clique no mapa abriu uma janela
+# Dano por alcatrão quando o capitão ainda não foi medido: o que o próprio jogo usou na captura
+# (Carter: 850.000 / 44.800 ≈ 19 com Alcatrão raro; 1.450.000 / 53.200 ≈ 27,3 com o épico).
+# O que sobra volta para a cidade com o capitão, então errar para mais é seguro.
+DEFAULT_DAMAGE_PER_TAR = {catalog_mod.TAR: 19.0, catalog_mod.RARE_TAR: 19.0, catalog_mod.EPIC_TAR: 27.0,
+                          catalog_mod.BLOODY_TAR: 19.0, catalog_mod.COAL_TAR: 19.0}
 
 
 class CollectorError(RuntimeError):
-    """Problema que impede a execução de começar ou de continuar."""
+    pass
 
 
-def icon_path(name: str) -> str:
-    return os.path.join(CRYPT_IMAGES_DIR, *name.split("/"))
+class OutOfSupply(GameError):
+    """Acabou o alcatrão ou a chave da faixa: ela para ou passa a ajudar outra faixa."""
 
 
-def icon_name(path: str) -> str:
-    """ "…/images/cript/epic/3.png" -> "epic/3.png" """
-    return "/".join(path.replace("\\", "/").split("/")[-2:])
+@dataclass
+class Lane:
+    index: int
+    captain: int
+    kind: str
+    level: int
+    types: set
+    quantity: int
+    equip: dict
+    done: int = 0
+    finished: bool = False
+    geared: bool = False
+    march: int | None = None
+    crypt: dict | None = None
+    tar_item: int | None = None
+    tar_sent: int = 0
+    tar_left: int | None = None
+    speedups: int = 0
+    sent_at: float = 0.0
+    checked_at: float = 0.0
+    status: str = ""
+    errors: int = 0
+    fallback: int | None = None          # faixa a ajudar quando acabar o alcatrão/chave
+    helping: "Lane | None" = None
+    stats: dict = field(default_factory=lambda: {"tar": 0, "speedups": 0, "keys": 0})
 
-
-def all_icon_names() -> Dict[str, List[str]]:
-    """As imagens de cripta disponíveis, por tipo, na ordem dos números dos arquivos."""
-    names: Dict[str, List[str]] = {}
-    for kind in CRYPT_TYPES:
-        folder = os.path.join(CRYPT_IMAGES_DIR, kind)
-        try:
-            files = [f for f in os.listdir(folder) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
-        except OSError:
-            files = []
-        # 1.png, 2.png, ... 10.png - e não 1, 10, 11, 2.
-        files.sort(key=lambda f: (int(f.split(".")[0]) if f.split(".")[0].isdigit() else 10 ** 6, f))
-        names[kind] = [f"{kind}/{f}" for f in files]
-    return names
-
-
-def recognise_icon(vision: Vision, haystack, names: Optional[List[str]] = None) -> Optional[Hit]:
-    """
-    Descobre qual ícone de cripta aparece em `haystack`, e em que escala.
-
-    Procura em uma faixa larga de escalas: o navegador desenha o jogo em um
-    tamanho que depende da janela, e as imagens de images/cript vieram do
-    cliente instalado. A escala medida aqui é guardada na calibração, e as
-    buscas da execução passam a varrer só uma escada curta em torno dela.
-    """
-    if names is None:
-        names = [name for group in all_icon_names().values() for name in group]
-    if haystack is None or not names:
-        return None
-    thresholds = {icon_path(n): t for n, t in ICON_THRESHOLDS.items()}
-    return vision.best_of(haystack, [icon_path(n) for n in names], WIDE_SCALES, thresholds)
+    @property
+    def label(self) -> str:
+        return f"[{self.index + 1}]"
 
 
 class Collector:
-    def __init__(self, browser: Browser, vision: Vision, calibration: Calibration, settings: Settings):
-        self.browser = browser
-        self.vision = vision
-        self.calibration = calibration
+    def __init__(self, settings, cat: dict, browser, cancel: CancelToken, on_status=None):
         self.settings = settings
+        self.cat = cat
+        self.browser = browser
+        self.cancel = cancel
+        self.on_status = on_status or (lambda lanes: None)
+        self.run_cfg = settings.section("run")
+        self.link: GameLink | None = None
+        self.game: Game | None = None
+        self.lanes: list[Lane] = []
+        self.reserved: dict[int, int] = {}       # cripta -> faixa
+        self.skip: dict[int, float] = {}         # cripta -> até quando fica de fora
+        self.found: list[dict] = []
+        self.search_at = 0.0
+        self.recoveries = 0
+        self.last_recovery = 0.0
 
-        run = settings.section("run")
-        self.any_mode = run.get("mode") == ANY_MODE
-        self.selected: List[str] = [] if self.any_mode else [
-            name for name in run.get("selected", []) if os.path.exists(icon_path(name))
-        ]
-        self.target = int(run.get("crypt_count", 0))
-        self.speedups = int(run.get("speedups_per_march", 0))
+    # ------------------------------------------------------------------ util
+    def log(self, text: str, level: str = "info"):
+        getattr(logger, level)(text)
 
-        timing = settings.section("timing")
-        self.click_delay = float(timing.get("click_delay", 1.5))
-        self.scroll_delta = int(timing.get("scroll_delta", 100))
-        self.max_scrolls = int(timing.get("max_scrolls", 80))
-        self.list_passes = max(1, int(timing.get("list_passes", 3)))
-        self.march_timeout = float(timing.get("march_timeout", 1800))
-        self.game_load_wait = float(timing.get("game_load_wait", GAME_LOAD_WAIT))
+    def cap_name(self, cid) -> str:
+        return (self.cat["captains"].get(int(cid)) or {}).get("name", f"#{cid}")
 
-    # -------------------------------------------------------------- preparação
-    def preflight(self) -> List[str]:
-        """O que falta para poder executar - vazio quando está tudo pronto."""
-        problems = []
-        missing = self.calibration.missing_steps()
-        if missing:
-            titles = ", ".join(tr(f"step.{name}.title") for name in missing)
-            problems.append(tr("run.missing_calibration", steps=titles))
-        if not self.any_mode and not self.selected:
-            problems.append(tr("run.no_selection"))
-        if self.target <= 0:
-            problems.append(tr("run.no_quantity"))
-        return problems
+    def crypt_name(self, ctype) -> str:
+        c = self.cat["crypts"].get(ctype) or {}
+        return f"{tr('kind.' + c.get('kind', 'common'))} {c.get('level', '?')} ({c.get('icon') or ctype})"
 
-    def sync_viewport(self):
-        """
-        Devolve a página ao tamanho em que foi calibrada e informa à calibração
-        o que de fato conseguiu.
+    def cfg(self, key, default=None):
+        v = self.run_cfg.get(key)
+        return default if v is None else v
 
-        Redimensionar vem primeiro porque elimina o problema; reescalar as
-        coordenadas só o compensa.
-        """
-        wanted = self.calibration.viewport
-        current = self.browser.viewport()
-        if wanted[0] and wanted[1] and current != wanted:
-            if self.browser.set_viewport(*wanted):
-                logger.info(tr("run.viewport_resized", width=wanted[0], height=wanted[1]))
-            else:
-                logger.warning(tr("run.viewport_rescaled", width=current[0], height=current[1],
-                                  cal_width=wanted[0], cal_height=wanted[1]))
-        current = self.browser.viewport()
-        self.calibration.use_viewport(*current)
-        self.viewport = current
-
-    # ---------------------------------------------------------------- execução
-    def run(self) -> Dict[str, int]:
-        problems = self.preflight()
-        if problems:
-            raise CollectorError("\n".join(problems))
-
-        self.browser.ensure_attached()
-        self.browser.make_visible()
-        self.sync_viewport()
-        logger.info(tr("run.start", target=self.target,
-                       mode=tr("mode.any") if self.any_mode else tr("run.images", count=len(self.selected))))
-
-        # Uma volta que falha não conta: a execução só termina com a quantidade
-        # pedida explorada, ou quando o usuário a interrompe.
-        done = failures = streak = 0
-        while done < self.target:
-            cancellation.check()
-            logger.info(tr("run.round", round=done + 1, target=self.target))
-            try:
-                success = self.collect_one()
-            except BrowserError as exc:
-                self.reconnect(exc)
-                success = False
-
-            if success:
-                done += 1
-                streak = 0
-            else:
-                failures += 1
-                streak += 1
-            logger.info(tr("run.progress", done=done, target=self.target, failures=failures))
-            if not success:
-                self.recover(streak)
-
-        return {"done": done, "failures": failures, "target": self.target}
-
-    def recover(self, streak: int):
-        """
-        Deixa o jogo pronto para a próxima volta depois de uma que falhou.
-
-        Uma janela que ficou aberta (a de uma cripta errada, uma oferta) taparia
-        os cliques seguintes, e a volta nova falharia pelo mesmo motivo.
-        """
+    def _status(self):
         try:
-            if streak and streak % MAX_CONSECUTIVE_FAILURES == 0:
-                # Tantas falhas seguidas indicam o jogo preso em alguma tela:
-                # recarregar a página o devolve ao mapa.
-                logger.error(tr("run.too_many_failures", count=streak))
-                self.browser.reload()
-                cancellation.sleep(self.game_load_wait)
-                self.sync_viewport()
-            self.close_store() or self.close_window()
-            self.browser.press_escape()
-        except BrowserError as exc:
-            self.reconnect(exc)
-        cancellation.sleep(0.5)
+            self.on_status([{"index": ln.index, "captain": ln.captain, "done": ln.done, "quantity": ln.quantity,
+                             "status": ln.status, "finished": ln.finished} for ln in self.lanes])
+        except Exception:  # noqa: BLE001
+            pass
 
-    def reconnect(self, error: Exception):
-        """
-        Recupera a conexão com o jogo, insistindo até conseguir.
-
-        Uma aba recarregada só precisa de uma conexão nova. Se nem isso
-        funciona - aba travada, navegador fechado - o jogo é aberto de novo.
-        """
-        logger.warning(tr("run.reconnecting", error=error))
-        reopen = False
-        while True:
-            cancellation.check()
-            try:
-                if reopen:
-                    logger.warning(tr("run.reopening"))
-                    self.browser.reopen_game()
-                    cancellation.sleep(self.game_load_wait)
-                else:
-                    self.browser.attach()
-                self.sync_viewport()
-                return
-            except BrowserError as exc:
-                logger.warning(tr("run.reconnect_failed", error=exc))
-                if reopen:
-                    cancellation.sleep(FAILURE_PAUSE)
-                reopen = True
-
-    def collect_one(self) -> bool:
-        self.close_store()
-        self.open_crypt_menu()
-
-        if self.any_mode:
-            logger.info(tr("run.any_selected"))
-            crypt = self.first_row_crypt()
-            self.click(self.calibration.region_center("go_button"))
-        else:
-            crypt = self.search_crypt()
-            if crypt is None:
-                logger.warning(tr("run.search_failed"))
-                return False
-
-        # É depois do Go que a loja costuma abrir sozinha.
-        self.close_store()
-        if not self.enter_crypt(crypt):
-            logger.warning(tr("run.explore_failed"))
-            return False
-        logger.info(tr("run.invading"))
-
-        if not self.speedup_march():
-            logger.warning(tr("run.speedup_failed"))
-            return False
-        return True
-
-    # ------------------------------------------------------------------- ações
-    def click(self, point: Point):
-        cancellation.check()
-        self.browser.click(point[0], point[1])
-        cancellation.sleep(self.click_delay)
-
-    def _find_close_button(self) -> Optional[Point]:
-        """O X de uma janela aberta, pela imagem calibrada (ou pela que vem com o aplicativo)."""
-        if self.calibration.is_calibrated("store_close_button"):
-            path = self.calibration.ref_path("store_close_button")
-            scale = self.calibration.image_scale("store_close_button")
-        else:
-            path = FALLBACK_CLOSE_IMAGE
-            scale = min(self.viewport[0] / BUNDLED_IMAGE_SIZE[0], self.viewport[1] / BUNDLED_IMAGE_SIZE[1])
-        hit = self.vision.find(path, None, base_scale=scale)
-        return hit.center if hit and hit.passed else None
-
-    def close_window(self) -> bool:
-        """Fecha uma janela qualquer que tenha ficado aberta (menu errado, oferta) pelo X dela."""
-        target = self._find_close_button()
-        if target is None:
-            return False
-        self.click(target)
-        logger.info(tr("run.popup_closed"))
-        return True
-
-    def close_store(self) -> bool:
-        """
-        Fecha a loja, se ela estiver aberta.
-
-        Com a loja calibrada, é a imagem dela que diz se está aberta - só então
-        o X é clicado. Sem essa calibração vale o comportamento antigo: qualquer
-        X visível na tela é fechado.
-        """
-        if not self.calibration.is_calibrated("store_marker"):
-            return self.close_window()
-        marker = self.vision.find(self.calibration.ref_path("store_marker"), None,
-                                  base_scale=self.calibration.image_scale("store_marker"))
-        if marker is None or not marker.passed:
-            return False
-        # O X é procurado pela imagem; se ela falhar, vale a posição calibrada.
-        target = self._find_close_button() or self.calibration.region_center("store_close_button")
-        if target is None:
-            return False
-        self.click(target)
-        logger.info(tr("run.store_closed"))
-        return True
-
-    def open_crypt_menu(self):
-        self.click(self.calibration.point("watchtower_button"))
-        self.click(self.calibration.point("crypts_tab"))
-
-    # ------------------------------------------------------------------- lista
-    def _search_column(self):
-        """A coluna de ícones da lista: onde procurar, e onde girar a roda do mouse."""
-        icon = self.calibration.region("crypt_icon_area")
-        whole_list = self.calibration.region("crypt_list_area")
-        if whole_list:
-            top, height = min(icon[1], whole_list[1]), whole_list[3]
-            if icon[1] < whole_list[1]:
-                height += whole_list[1] - icon[1]
-            column = (icon[0] - icon[2] // 4, top, icon[2] + icon[2] // 2, height)
-            watched = whole_list
-        else:
-            # Sem a lista calibrada, só a primeira linha, com folga para um
-            # ícone que parou desalinhado depois da rolagem.
-            column = expand(icon, icon[2] // 4, icon[3] // 2)
-            watched = expand(icon, icon[2], icon[3])
-        return column, watched
-
-    def _icon_scales(self):
-        scale = self.calibration.current_icon_scale()
-        return ladder(scale) if scale else WIDE_SCALES
-
-    def find_crypt(self, column) -> Optional[Hit]:
-        """O ícone selecionado que melhor casa na coluna, com a caixa em pixels da página."""
-        haystack, (left, top) = self.vision.grab(column)
-        if haystack is None:
-            return None
-        thresholds = {icon_path(n): t for n, t in ICON_THRESHOLDS.items()}
-        hit = self.vision.best_of(haystack, [icon_path(n) for n in self.selected],
-                                  self._icon_scales(), thresholds)
-        if hit is None:
-            return None
-        return hit._replace(box=(hit.box[0] + left, hit.box[1] + top, hit.box[2], hit.box[3]))
-
-    def first_row_crypt(self) -> Optional[str]:
-        """Qual cripta está na primeira linha da lista - no modo Qualquer ninguém a escolheu."""
-        icon = self.calibration.region("crypt_icon_area")
-        haystack, _ = self.vision.grab(expand(icon, icon[2] // 4, icon[3] // 2))
-        if haystack is None:
-            return None
-        names = [name for group in all_icon_names().values() for name in group]
-        thresholds = {icon_path(n): t for n, t in ICON_THRESHOLDS.items()}
-        hit = self.vision.best_of(haystack, [icon_path(n) for n in names], self._icon_scales(), thresholds)
-        return icon_name(hit.path) if hit and hit.passed else None
-
-    def search_crypt(self) -> Optional[str]:
-        """
-        Percorre a lista até achar uma das criptas selecionadas e clica no Go da linha dela.
-
-        Devolve o nome da imagem que casou ("rare/2.png"), ou None se nenhuma apareceu.
-        """
-        column, watched = self._search_column()
-        anchor = (watched[0] + watched[2] // 2, watched[1] + watched[3] // 2)
-        go = self.calibration.region_center("go_button")
-        icon = self.calibration.region_center("crypt_icon_area")
-
-        passes = scrolls = 0
-        while True:
-            cancellation.check()
-            hit = self.find_crypt(column)
-            name = icon_name(hit.path) if hit else "-"
-            if hit and hit.passed:
-                logger.info(tr("run.crypt_found", name=name, score=hit.score))
-                if not self.calibration.icon_scale:
-                    self.calibration.set_icon_scale(hit.scale, self.viewport)
-                    self.calibration.save()
-                # O Go fica na mesma linha do ícone, com o deslocamento calibrado.
-                self.click((go[0], hit.center[1] + (go[1] - icon[1])))
-                return name
-            logger.debug(f"no crypt above threshold; best guess {name} "
-                         f"score {hit.score if hit else 0:.3f} scale {hit.scale if hit else 0}")
-
-            before = self.browser.capture(watched)
-            self.browser.scroll(anchor[0], anchor[1], self.scroll_delta)
-            cancellation.sleep(SCROLL_SETTLE)
-            scrolls += 1
-            at_end = changed_fraction(before, self.browser.capture(watched)) < LIST_END_CHANGE
-            if not at_end and scrolls < self.max_scrolls:
+    # ------------------------------------------------------------------ início
+    def build_lanes(self) -> list[Lane]:
+        lanes = []
+        used_caps = set()
+        for i, lc in enumerate(self.settings.data.get("lanes") or []):
+            if not lc.get("enabled") or not lc.get("captain"):
                 continue
+            cap = int(lc["captain"])
+            if cap in used_caps:
+                raise CollectorError(tr("err.same_captain", name=self.cap_name(cap)))
+            used_caps.add(cap)
+            groups = catalog_mod.groups(self.cat, lc.get("kind"), int(lc.get("level") or 0))
+            types = {t for g in (lc.get("groups") or []) for t in groups.get(g, [])}
+            if not types:
+                raise CollectorError(tr("err.no_types", lane=i + 1))
+            lanes.append(Lane(index=i, captain=cap, kind=lc["kind"], level=int(lc["level"]), types=types,
+                              quantity=int(lc.get("quantity") or 0),
+                              equip={"gear": list(lc.get("gear") or [None, None, None]),
+                                     "artifact": lc.get("artifact")},
+                              fallback=lc.get("fallback") if isinstance(lc.get("fallback"), int) else None))
+        if not lanes:
+            raise CollectorError(tr("err.no_lanes"))
+        plan = {ln.captain: ln.equip for ln in lanes}
+        if gear_mod.conflicts(plan):
+            raise CollectorError(tr("err.gear_conflict"))
+        return lanes
 
-            passes += 1
-            if at_end and scrolls == 1:
-                logger.info(tr("run.list_did_not_move"))
-            if passes >= self.list_passes:
-                logger.info(tr("run.list_exhausted", best=name, score=hit.score if hit else 0.0))
-                return None
+    def connect(self, wait: float = 30.0):
+        if self.link:
+            try:
+                self.link.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        port = int(self.settings.get("browser", "cdp_port"))
+        self.link = GameLink(port, (self.settings.get("browser", "url_filter") or "totalbattle").lower())
+        self.link.start(wait=wait)
+        city = self.game.city if self.game else None
+        offset = self.game.clock_offset if self.game else 0.0
+        self.game = Game(self.link)
+        self.game.city, self.game.clock_offset = city, offset
+        if not self.game.city:
+            self.game.find_city()
 
-            logger.info(tr("run.list_restart", current=passes + 1, total=self.list_passes))
-            self.close_window()
-            self.open_crypt_menu()
-            self.scroll_to_top(anchor, watched)
-            scrolls = 0
+    def run(self):
+        self.lanes = self.build_lanes()
+        self.log(tr("log.connecting"))
+        self.with_recovery(self.connect)
+        st = self.with_recovery(lambda: self.game.state())
+        for ln in self.lanes:
+            if ln.captain not in st["captains"]:
+                raise CollectorError(tr("err.captain_missing", name=self.cap_name(ln.captain)))
+            self.log(f"{ln.label} {self.cap_name(ln.captain)}: {tr('kind.' + ln.kind)} {ln.level} · "
+                     f"{len(ln.types)} {tr('log.types')} · {tr('log.quantity')} {ln.quantity or '∞'}")
+            where = st["captains"][ln.captain]["where"]
+            if not st["captains"][ln.captain]["home"] and where:
+                ln.march, ln.sent_at = where, time.time()
+                ln.status = tr("status.away")
+        try:
+            while not all(ln.finished and not ln.march for ln in self.lanes):
+                try:
+                    self.loop_once()
+                except LinkDown as e:
+                    self.recover(str(e))
+        finally:
+            self.settings.save()
+        self.summary()
 
-    def scroll_to_top(self, anchor: Point, watched):
-        for _ in range(self.max_scrolls):
-            cancellation.check()
-            before = self.browser.capture(watched)
-            self.browser.scroll(anchor[0], anchor[1], -6 * abs(self.scroll_delta))
-            cancellation.sleep(SCROLL_SETTLE)
-            if changed_fraction(before, self.browser.capture(watched)) < LIST_END_CHANGE:
+    def loop_once(self):
+        self.cancel.check()
+        self.watchdog()
+        st = self.game.state()
+        for ln in self.lanes:
+            self.cancel.check()
+            try:
+                self.step(ln, st)
+                ln.errors = 0
+            except LinkDown:
+                raise
+            except GameError as e:
+                ln.errors += 1
+                self.release(ln)
+                self.log(f"{ln.label} {self.cap_name(ln.captain)}: {e}", "warning")
+                if ln.errors >= int(self.cfg("max_errors", 5)):
+                    ln.finished = True
+                    ln.status = tr("status.stopped_errors")
+                    self.log(f"{ln.label} {tr('log.lane_stopped')}", "error")
+        self._status()
+        self.cancel.sleep(float(self.cfg("tick", 2.0)))
+
+    # ------------------------------------------------------------------ faixas
+    def step(self, ln: Lane, st: dict):
+        cap = st["captains"].get(ln.captain) or {}
+        if ln.march:
+            if cap.get("home"):
+                self.finish_march(ln)
+            else:
+                self.track(ln)
+            return
+        if ln.finished:
+            return
+        if not cap.get("home"):
+            ln.status = tr("status.away")
+            return
+        if ln.helping:
+            target = ln.helping
+            if target.finished or (target.quantity and target.done >= target.quantity):
+                ln.finished = True
+                ln.status = tr("status.done")
+                self.log(f"{ln.label} {self.cap_name(ln.captain)}: {tr('log.help_done', n=target.index + 1)}")
                 return
+        elif ln.quantity and ln.done >= ln.quantity:
+            ln.finished = True
+            ln.status = tr("status.done")
+            self.log(f"{ln.label} {self.cap_name(ln.captain)}: {tr('log.lane_done', n=ln.done)}")
+            return
+        if not 1 <= int(cap.get("slot") or 0) <= 3:
+            self.lineup(ln, st)
+        if not ln.geared:
+            self.apply_gear(ln, st)
+        self.dispatch(ln, st)
 
-    # ------------------------------------------------------------------ cripta
-    def _tile(self) -> Tuple[int, int]:
-        """Distância, na tela, entre uma casa do mapa e as vizinhas dela."""
-        grid = self.calibration.map_grid()
-        if grid:
-            (ax, ay), (bx, by) = grid
-            return max(abs(ax), abs(bx)), max(abs(ay), abs(by))
-        return self.viewport[0] // 9, self.viewport[1] // 9
+    def lineup(self, ln: Lane, st: dict):
+        """Põe o capitão da faixa na lista de 3 capitães da marcha: numa posição vazia ou no lugar
+        de um capitão que está em casa e não é de nenhuma faixa."""
+        ours = {x.captain for x in self.lanes}
+        slots = {c["slot"]: cid for cid, c in st["captains"].items() if 1 <= int(c.get("slot") or 0) <= 3}
+        free = [p for p in (1, 2, 3) if p not in slots]
+        idle = [p for p, cid in slots.items() if cid not in ours and st["captains"][cid]["home"]]
+        if not free and not idle:
+            raise GameError(tr("log.no_slot"))
+        pos = (free or idle)[0]
+        out = slots.get(pos)
+        self.game.put_captain(pos, ln.captain)
+        st.update(self.game.state())
+        if st["captains"].get(ln.captain, {}).get("slot") != pos:
+            raise GameError(tr("log.no_slot"))
+        self.log(f"{ln.label} {tr('log.slot', name=self.cap_name(ln.captain), pos=pos)}"
+                 + (f" ({tr('log.slot_out', name=self.cap_name(out))})" if out else ""))
 
-    def _crypt_offsets(self) -> List[Point]:
-        """
-        A cripta e as oito casas em volta dela, como deslocamentos do ponto calibrado.
+    def apply_gear(self, ln: Lane, st: dict):
+        ln.geared = True
+        if not any(ln.equip.get("gear") or []) and not ln.equip.get("artifact"):
+            return
+        art_map = {int(k): v for k, v in (self.settings.data.get("artifact_map") or {}).items()}
+        n = gear_mod.apply(self.game, self.cat, st, {ln.captain: ln.equip}, self.log, self.cap_name, art_map)
+        self.settings.data["artifact_map"] = {str(k): v for k, v in art_map.items()}
+        # a troca por peça igual também fica no equipamento salvo
+        lanes_cfg = self.settings.data.get("lanes") or []
+        if ln.index < len(lanes_cfg):
+            lanes_cfg[ln.index]["gear"] = ln.equip.get("gear")
+        if n:
+            self.log(f"{ln.label} {self.cap_name(ln.captain)}: {tr('log.gear_applied', n=n)}")
+            st.update(self.game.state())
 
-        Com as duas casas vizinhas calibradas a grade é medida: as outras seis
-        saem dos dois deslocamentos (os opostos, a soma e a diferença). Sem
-        elas, a distância entre as casas é estimada pelo tamanho da página.
-        """
-        grid = self.calibration.map_grid()
-        if grid:
-            (ax, ay), (bx, by) = grid
-            return [(0, 0), (ax, ay), (-ax, -ay), (bx, by), (-bx, -by),
-                    (ax + bx, ay + by), (-ax - bx, -ay - by), (ax - bx, ay - by), (bx - ax, by - ay)]
-        dx, dy = self._tile()
-        return [(0, 0), (0, dy), (0, -dy), (dx, 0), (-dx, 0),
-                (dx // 2, dy // 2), (-dx // 2, -dy // 2), (dx // 2, -dy // 2), (-dx // 2, dy // 2)]
+    def candidates(self, pos, ln: Lane) -> list[dict]:
+        now = time.time()
+        every = float(self.cfg("search_every", 30))
+        mine = [c for c in self.found if c["type"] in ln.types]
+        if now - self.search_at > every or (not mine and now - self.search_at > 8):
+            types = set().union(*(x.types for x in self.lanes if not x.finished)) or ln.types
+            radius = int(self.cfg("search_radius", 150))
+            if self.cfg("search_mode", "spyglass") == "scan":
+                self.found = self.game.scan(pos, types, min(radius, 200))
+            else:
+                self.found = self.game.search(pos, types, radius)
+            self.search_at = now
+            mine = [c for c in self.found if c["type"] in ln.types]
+        for k in [k for k, until in self.skip.items() if until < now]:
+            del self.skip[k]
+        return [c for c in mine if c["id"] not in self.reserved and c["id"] not in self.skip]
 
-    def _crypt_points(self) -> List[Point]:
-        """O ponto calibrado da cripta e os pontos em volta dele, para quando ela não cai no centro."""
-        x, y = self.calibration.point("crypt_on_map")
-        return [(x + ox, y + oy) for ox, oy in self._crypt_offsets()]
+    def dispatch(self, ln: Lane, st: dict):
+        cands = self.candidates(st["pos"], ln)
+        if not cands:
+            ln.status = tr("status.no_crypt")
+            return
+        chosen = info = None
+        check = cands[: int(self.cfg("max_checks", 8))]
+        infos = self.game.crypt_info([c["id"] for c in check])
+        min_left = float(self.cfg("min_time_left", 180))
+        for c in check:
+            i = infos.get(c["id"])
+            if not i or i["health"] <= 0:
+                self.forget(c["id"])
+                continue
+            if i["ends"] - self.game.now() < min_left:
+                self.skip[c["id"]] = time.time() + 3600
+                continue
+            if self.cfg("check_marches", True):
+                others = self.game.marches_to(c["id"], c["pos"])
+                if others:
+                    self.log(f"{ln.label} {tr('log.someone_going', pos=self.fmt_pos(c['pos']))}")
+                    self.skip[c["id"]] = time.time() + 300
+                    continue
+            chosen, info = c, i
+            break
+        if not chosen:
+            ln.status = tr("status.no_crypt")
+            return
+        cdef = self.cat["crypts"].get(chosen["type"]) or {}
+        self.reserved[chosen["id"]] = ln.index
+        try:
+            tar = self.tar_for(ln, cdef, info, st)      # antes da chave: sem alcatrão, a chave não é gasta
+            if info["closed"]:
+                self.open_rare(ln, chosen, cdef, st)
+            march = self.game.explore(chosen, ln.captain, tar)
+        except OutOfSupply as e:
+            self.reserved.pop(chosen["id"], None)
+            self.out_of_supply(ln, str(e))
+            return
+        except GameError:
+            self.reserved.pop(chosen["id"], None)
+            self.skip[chosen["id"]] = time.time() + 120
+            raise
+        ln.march, ln.sent_at, ln.speedups, ln.tar_left = march, time.time(), 0, None
+        ln.crypt = dict(chosen, health=info["health"], level=cdef.get("level"), kind=cdef.get("kind"))
+        if tar:
+            ln.tar_item, ln.tar_sent = next(iter(tar.items()))
+            st["res"][ln.tar_item] = st["res"].get(ln.tar_item, 0) - ln.tar_sent
+        else:
+            ln.tar_item, ln.tar_sent = None, 0
+        ln.status = tr("status.marching", pos=self.fmt_pos(chosen["pos"]))
+        tar_txt = f" · {ln.tar_sent:,} {self.item_name(ln.tar_item)}" if ln.tar_item else ""
+        self.log(f"{ln.label} {self.cap_name(ln.captain)} → {self.crypt_name(chosen['type'])} "
+                 f"{self.fmt_pos(chosen['pos'])} ({chosen['dist']:.0f}){tar_txt}")
+        self.speed(ln, st)
 
-    # A cripta no mapa
-    # ----------------
-    # Depois de algumas dezenas de criptas o jogo deixa de centralizar o mapa
-    # nela: a cripta aparece em uma das casas vizinhas. Clicar nas nove posições
-    # até acertar funciona, mas cada erro custa segundos. Então, quando um clique
-    # acerta, o pedaço do mapa em volta dele é guardado como a aparência daquela
-    # cripta; nas voltas seguintes esse recorte é procurado na vizinhança do
-    # centro e o primeiro clique vai direto para onde ele casou. As nove
-    # posições continuam como reserva, e um recorte que levou a um clique errado
-    # é substituído pelo do clique que acertou.
-    def _sprite_half(self) -> int:
-        """Metade do lado do recorte memorizado: ele cobre a cripta, não a casa inteira."""
-        return max(16, self._tile()[0] // 4)
+    def open_rare(self, ln: Lane, crypt: dict, cdef: dict, st: dict):
+        for item, qty in (cdef.get("key") or {}).items():
+            if st["res"].get(item, 0) < qty:
+                raise OutOfSupply(tr("log.no_key", name=self.item_name(item)))
+        self.game.open_crypt(crypt["id"])
+        for item, qty in (cdef.get("key") or {}).items():
+            st["res"][item] = st["res"].get(item, 0) - qty
+        ln.stats["keys"] += 1
+        self.log(f"{ln.label} {tr('log.opened')}")
 
-    def _map_area(self) -> Region:
-        """A vizinhança do ponto calibrado: todas as posições possíveis, com folga para o recorte."""
-        x, y = self.calibration.point("crypt_on_map")
-        offsets = self._crypt_offsets()
-        dx, dy = max(abs(ox) for ox, _ in offsets), max(abs(oy) for _, oy in offsets)
-        reach = 2 * self._sprite_half()
-        return (x - dx - reach, y - dy - reach, 2 * (dx + reach), 2 * (dy + reach))
+    def tar_for(self, ln: Lane, cdef: dict, info: dict, st: dict) -> dict:
+        item = (self.settings.data.get("tar_items") or {}).get(cdef.get("kind")) or catalog_mod.TAR_BY_KIND.get(cdef.get("kind"))
+        if not item:
+            return {}
+        item = int(item)
+        health = info["health"] or cdef.get("health") or 0
+        learned = (self.settings.data.get("tar_learned") or {}).get(f"{ln.captain}:{item}")
+        if learned:
+            dpt = float(learned) / float(self.cfg("tar_margin", 1.25))
+        else:
+            dpt = DEFAULT_DAMAGE_PER_TAR.get(item, 19.0)
+        qty = int(math.ceil(health / max(dpt, 1.0) / 100.0) * 100)
+        have = st["res"].get(item, 0)
+        if have < qty:
+            raise OutOfSupply(tr("log.no_tar", name=self.item_name(item), need=f"{qty:,}", have=f"{have:,}"))
+        return {item: qty}
 
-    def _map_ref_path(self, crypt: str) -> str:
-        """ "rare/2.png" -> calib_refs/map/rare_2.png """
-        return os.path.join(self.calibration.refs_dir, "map", crypt.replace("/", "_"))
+    def out_of_supply(self, ln: Lane, why: str):
+        """Sem alcatrão/chave: passa a fazer as criptas da faixa escolhida (uma vez), senão para."""
+        target = next((x for x in self.lanes if x.index == ln.fallback and x is not ln), None)
+        if ln.helping is None and target and not target.finished:
+            ln.helping = target
+            ln.kind, ln.level, ln.types = target.kind, target.level, set(target.types)
+            ln.status = tr("status.helping", n=target.index + 1)
+            self.log(f"{ln.label} {self.cap_name(ln.captain)}: {why} → "
+                     f"{tr('log.helping', n=target.index + 1, name=self.cap_name(target.captain), kind=tr('kind.' + target.kind), level=target.level)}",
+                     "warning")
+            return
+        ln.finished = True
+        ln.status = tr("status.no_supply")
+        self.log(f"{ln.label} {self.cap_name(ln.captain)}: {why}; {tr('log.lane_no_supply')}", "warning")
 
-    def _map_refs(self, crypt: Optional[str]) -> List[str]:
-        """O recorte da cripta escolhida; sem saber qual ela é, todos os já memorizados."""
+    def speed(self, ln: Lane, st: dict | None = None):
+        if not self.cfg("speedup", True):
+            return
+        item = int(self.cfg("speedup_item", catalog_mod.MARCH_SPEEDUP))
+        limit = int(self.cfg("speedups_per_march", 5))
+        while ln.speedups < limit:
+            if st is not None and st["res"].get(item, 0) <= 0:
+                self.log(f"{ln.label} {tr('log.no_speedups')}", "warning")
+                return
+            if not self.game.speedup(ln.march, item):
+                return
+            ln.speedups += 1
+            ln.stats["speedups"] += 1
+            if st is not None:
+                st["res"][item] = st["res"].get(item, 0) - 1
+            self.cancel.sleep(0.4)
+
+    def track(self, ln: Lane):
+        now = time.time()
+        if now - ln.checked_at < float(self.cfg("track_every", 4)):
+            return
+        ln.checked_at = now
+        m = self.game.march(ln.march)
+        if not m:
+            return
+        if m["returning"] and ln.tar_item:
+            ln.tar_left = int(m["carried"].get(ln.tar_item, 0))
+        left = (m["end"] or 0) - self.game.now()
+        if left > float(self.cfg("speedup_min_left", 25)) and ln.speedups < int(self.cfg("speedups_per_march", 5)):
+            self.speed(ln)
+        timeout = float(self.cfg("march_timeout", 1800))
+        if now - ln.sent_at > timeout and ln.status != tr("status.slow"):
+            ln.status = tr("status.slow")
+            self.log(f"{ln.label} {tr('log.slow', s=int(now - ln.sent_at))}", "warning")
+
+    def finish_march(self, ln: Lane):
+        crypt = ln.crypt
+        ln.status = ""
         if crypt:
-            return [self._map_ref_path(crypt)]
-        folder = os.path.join(self.calibration.refs_dir, "map")
-        try:
-            return [os.path.join(folder, f) for f in sorted(os.listdir(folder)) if f.lower().endswith(".png")]
-        except OSError:
-            return []
+            info = self.game.crypt_info([crypt["id"]]).get(crypt["id"])
+            used = None if ln.tar_left is None else max(0, ln.tar_sent - ln.tar_left)
+            if used is not None:
+                ln.stats["tar"] += used
+            gone = info is None or info["health"] <= 0
+            # gasto 0 só é certeza de "não foi nossa" se a volta foi vista; sem ela, cripta sumida
+            # depois da nossa chegada conta como feita
+            if gone and used != 0:
+                ln.done += 1
+                owner = ln.helping or ln                # ajudando: conta na faixa ajudada
+                if ln.helping:
+                    owner.done += 1
+                self.learn(ln, crypt["health"], used)
+                self.log(f"{ln.label} {self.cap_name(ln.captain)}: {tr('log.crypt_done')} "
+                         + (f"[{owner.index + 1}] " if ln.helping else "")
+                         + f"({owner.done}/{owner.quantity or '∞'})"
+                         + (f" · {used:,} {self.item_name(ln.tar_item)}" if used else ""))
+            elif not gone:
+                hit = crypt["health"] - info["health"]
+                if used:
+                    self.learn(ln, hit, used)
+                left = f"{info['health']:,}"
+                self.log(f"{ln.label} {tr('log.partial', left=left)}", "warning")
+            else:
+                self.log(f"{ln.label} {tr('log.taken')}", "warning")
+            self.forget(crypt["id"])
+        ln.march = ln.crypt = None
+        ln.tar_item, ln.tar_sent, ln.tar_left = None, 0, None
+        self.reserved = {k: v for k, v in self.reserved.items() if v != ln.index}
 
-    def _locate_on_map(self, snapshot, origin: Point, crypt: Optional[str]) -> Optional[Point]:
-        """Onde clicar, pelo recorte memorizado - ou None se ele não existe ou não aparece."""
-        if snapshot is None:
-            return None
-        best_score, best_point = 0.0, None
-        for path in self._map_refs(crypt):
-            if not os.path.exists(path):
-                continue
+    def learn(self, ln: Lane, damage: int, used: int | None):
+        """Guarda o dano por alcatrão do capitão (média com a medida anterior)."""
+        if not used or not ln.tar_item or damage <= 0:
+            return
+        key = f"{ln.captain}:{ln.tar_item}"
+        table = self.settings.data.setdefault("tar_learned", {})
+        dpt = damage / used
+        old = table.get(key)
+        table[key] = round(dpt if not old else (old * 0.6 + dpt * 0.4), 3)
+
+    def release(self, ln: Lane):
+        if not ln.march:
+            self.reserved = {k: v for k, v in self.reserved.items() if v != ln.index}
+
+    def forget(self, crypt_id: int):
+        self.found = [c for c in self.found if c["id"] != crypt_id]
+        self.reserved.pop(crypt_id, None)
+
+    # ------------------------------------------------------------- vigia
+    def watchdog(self):
+        if not self.link or not self.link.alive:
+            raise LinkDown(tr("log.tab_lost"))
+        quiet = time.time() - self.link.last_game_request
+        if quiet > float(self.cfg("freeze_seconds", 90)):
+            raise LinkDown(tr("log.frozen", s=int(quiet)))
+
+    def with_recovery(self, fn, *args):
+        for _ in range(int(self.cfg("max_recoveries", 10)) + 1):
+            self.cancel.check()
             try:
-                # Em cores: no mapa a cor separa a cripta do terreno melhor que a forma.
-                template = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
-            except OSError:
-                continue
-            if template is None or template.shape[0] > snapshot.shape[0] or template.shape[1] > snapshot.shape[1]:
-                continue
-            result = cv2.matchTemplate(snapshot, template, cv2.TM_CCOEFF_NORMED)
-            result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
-            _, score, _, location = cv2.minMaxLoc(result)
-            if score > best_score:
-                best_score = float(score)
-                best_point = (origin[0] + location[0] + template.shape[1] // 2,
-                              origin[1] + location[1] + template.shape[0] // 2)
-        if best_point is None or best_score < MAP_MATCH_THRESHOLD:
-            logger.debug(f"crypt {crypt or '?'} not located on the map (best score {best_score:.2f}).")
-            return None
-        logger.info(tr("run.map_located", x=best_point[0], y=best_point[1], score=best_score))
-        return best_point
+                return fn(*args)
+            except LinkDown as e:
+                self.recover(str(e))
+        raise CollectorError(tr("err.unrecoverable"))
 
-    def _learn_map_sprite(self, snapshot, origin: Point, position: Point, crypt: Optional[str]):
-        """Guarda o pedaço do mapa em volta do clique que abriu a cripta."""
-        if snapshot is None or not crypt:
-            return
-        half = self._sprite_half()
-        left, top = position[0] - origin[0] - half, position[1] - origin[1] - half
-        if left < 0 or top < 0:
-            return
-        crop = snapshot[top:top + 2 * half, left:left + 2 * half]
-        if crop.shape[:2] != (2 * half, 2 * half):
-            return
-        path = self._map_ref_path(crypt)
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            # imencode + tofile: o imwrite não grava em caminhos com acentos no Windows.
-            cv2.imencode(".png", crop)[1].tofile(path)
-        except (OSError, cv2.error) as exc:
-            logger.debug(f"could not save the map sprite of {crypt}: {exc}")
-            return
-        logger.info(tr("run.map_learned", name=crypt))
-
-    def _window_area(self) -> Region:
-        """Onde uma janela aberta por um clique no mapa aparece: os botões Explorar e Abrir."""
-        region = self.calibration.region("explore_button")
-        margin = max(20, region[3])
-        left, top, width, height = expand(region, margin, margin)
-        right, bottom = left + width, top + height
-        open_button = self.calibration.point("open_button")
-        if open_button:
-            left, top = min(left, open_button[0] - margin), min(top, open_button[1] - margin)
-            right, bottom = max(right, open_button[0] + margin), max(bottom, open_button[1] + margin)
-        return (left, top, right - left, bottom - top)
-
-    def _find_explore(self) -> Optional[Point]:
-        region = self.calibration.region("explore_button")
-        margin = max(20, region[3])
-        hit = self.vision.find(self.calibration.ref_path("explore_button"), expand(region, margin, margin),
-                               base_scale=self.calibration.image_scale("explore_button"))
-        return hit.center if hit and hit.passed else None
-
-    def enter_crypt(self, crypt: Optional[str] = None) -> bool:
-        """Clica na cripta no mapa e no botão Explorar (passando pelo Abrir nas criptas raras)."""
-        open_button = self.calibration.point("open_button")
-        watched = self._window_area()
-
-        area = self._map_area()
-        origin = (max(0, area[0]), max(0, area[1]))
-        snapshot = self.browser.capture(area)
-        positions = self._crypt_points()
-        guess = self._locate_on_map(snapshot, origin, crypt)
-        if guess:
-            near = self._sprite_half()
-            positions = [guess] + [p for p in positions
-                                   if abs(p[0] - guess[0]) > near or abs(p[1] - guess[1]) > near]
-
-        for attempt, position in enumerate(positions):
-            cancellation.check()
-            if attempt > 0:
-                logger.info(tr("run.explore_retry", attempt=attempt + 1, total=len(positions)))
-
-            before = self.browser.capture(watched)
-            self.click(position)
-            # Um clique em terreno vazio não abre janela nenhuma: sem mudança
-            # onde os botões apareceriam, não vale procurar por eles - nem
-            # clicar às cegas na posição do Abrir, que ali ainda é mapa.
-            opened = changed_fraction(before, self.browser.capture(watched)) >= WINDOW_OPENED_CHANGE
-            if opened:
-                explore = self._find_explore()
-                if explore is None and open_button:
-                    self.click(open_button)
-                    explore = self._find_explore()
-                if explore is not None:
-                    if position != guess:
-                        self._learn_map_sprite(snapshot, origin, position, crypt)
-                    self.click(explore)
-                    return True
-
-            # O clique caiu em outro objeto do mapa: o jogo abre um popup com as
-            # informações dele, que taparia o próximo clique. Ele pode aparecer
-            # fora da área dos botões, então o X é procurado mesmo sem `opened`.
-            closed = self.close_store() or self.close_window()
-            if opened and not closed:
-                self.browser.press_escape()
-                cancellation.sleep(0.5)
+    def recover(self, reason: str):
+        """F5; se o jogo não voltar, reinicia o Chrome. Repete até max_recoveries."""
+        if time.time() - self.last_recovery > 1800:
+            self.recoveries = 0
+        self.recoveries += 1
+        self.last_recovery = time.time()
+        if self.recoveries > int(self.cfg("max_recoveries", 10)):
+            raise CollectorError(tr("err.unrecoverable"))
+        self.log(tr("log.recovering", reason=reason), "warning")
+        self.found, self.search_at = [], 0.0
+        steps = (("reload", float(self.cfg("reload_wait", 120))), ("restart", float(self.cfg("restart_wait", 240))))
+        for step, wait in steps:
+            self.cancel.check()
+            try:
+                if step == "reload":
+                    if not self.browser.reload():
+                        continue
+                    self.log(tr("log.reloaded"))
+                else:
+                    self.log(tr("log.restarting"), "warning")
+                    self.browser.restart()
+                self.cancel.sleep(8)
+                self.connect(wait=wait)
+                self.log(tr("log.recovered"))
+                return True
+            except Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.log(tr("log.recover_failed", step=step, err=e), "warning")
+        self.log(tr("log.recover_wait"), "warning")
+        self.cancel.sleep(60)
         return False
 
-    # ------------------------------------------------------------------ marcha
-    def _march_visible(self) -> bool:
-        region = self.calibration.region("march_icon")
-        margin = max(10, region[3] // 2)
-        hit = self.vision.find(self.calibration.ref_path("march_icon"), expand(region, margin, margin),
-                               base_scale=self.calibration.image_scale("march_icon"))
-        return bool(hit and hit.passed)
+    # ------------------------------------------------------------- textos
+    def item_name(self, item) -> str:
+        return (self.cat["items"].get(item) or {}).get("name", f"item {item}")
 
-    def speedup_march(self) -> bool:
-        """Usa as acelerações e espera a marcha ir e voltar."""
-        self.click(self.calibration.point("speedup_button"))
-        if not self._march_visible():
-            return False
+    @staticmethod
+    def fmt_pos(p) -> str:
+        return f"X:{p[1]} Y:{p[2]}"
 
-        use = self.calibration.point("use_button")
-        for _ in range(self.speedups):
-            self.click(use)
-
-        # A tela de aceleração fecha sozinha quando a marcha chega.
-        started = time.time()
-        while self._march_visible():
-            if time.time() - started > self.march_timeout:
-                logger.warning(tr("run.march_timeout"))
-                break
-            logger.info(tr("run.waiting_march"))
-            cancellation.sleep(5.0)
-
-        duration = time.time() - started
-        logger.info(tr("run.waiting_return", seconds=int(duration)))
-        cancellation.sleep(duration)
-        return True
+    def summary(self):
+        for ln in self.lanes:
+            self.log(f"{ln.label} {self.cap_name(ln.captain)}: {ln.done} {tr('log.crypts')} · "
+                     f"{ln.stats['tar']:,} {tr('log.tar')} · {ln.stats['speedups']} {tr('log.speedups')} · "
+                     f"{ln.stats['keys']} {tr('log.keys')}")

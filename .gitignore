@@ -1,11 +1,19 @@
 __pycache__/
 build/
 dist/
+release/
 python/
+*.zip
 
-# Gerados nesta máquina: configuração, calibração, logs e perfil do navegador
+# Gerados nesta máquina: configuração, dados do jogo em cache, logs, capturas e perfil do navegador
 config.json
+config.json.tmp
+data/
+logs/
+captures/
+browser_profile/
+
+# Da versão 2.x (calibração da tela), não usados mais
 calibration.json
 calib_refs/
-logs/
-browser_profile/
+staging/
