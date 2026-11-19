@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.0.0
+
+### New
+
+- **Everything through the game network.** The collector talks to the game server from inside the game tab
+  (the Autoattack technique): no clicks, no screen reading, no calibration.
+- **Crypts found automatically**: the game's spyglass search (route 26001) or a scan of the map blocks
+  around the city (route 312). The closest free crypt is always chosen.
+- **Up to 3 captains at once**, each with one crypt family and level and one or more crypt types of that
+  level. Several captains may do the same type. Mixing families or levels in one captain is not possible.
+- **Never the same crypt twice**: crypts are reserved per captain, and a crypt with another player's march
+  heading to it is skipped (map block check before sending).
+- **Rare crypts opened with the Dragon Key** (route 14004), the right tar sent with the march, and **automatic
+  speedups** (item 2102) until the game stops accepting them.
+- **Tar learned per captain**: the tar left over comes back with the captain; the damage per tar is measured
+  and the next march carries the right amount. A crypt left with health gets another march.
+- **Captains put in the 3-captain march list** automatically (route 905).
+- **Armour and artifact per captain** (routes 901/910/61002), chosen from the inventory, applied before the
+  first crypt.
+- **Saved selections**: captains, crypts, armour and artifacts saved with a name and loaded back.
+- **Crypt pictures from the game** (Unity CDN), not from the `images` folder.
+- **Game watchdog**: if the game stops talking to the server (frozen) or the tab stops answering, the page is
+  reloaded (F5); if that is not enough, the Chrome on the CDP port is closed and opened again with the same
+  profile, and the run continues.
+
+### Removed
+
+- Calibration wizard, screen recognition (OpenCV) and the crypt images folder.
+
 ## 2.0.0
 
 ### New
